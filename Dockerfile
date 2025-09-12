@@ -13,10 +13,10 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Upewniamy się, że wszystkie nasze pliki źródłowe są kopiowane
+# Kopiujemy tylko te pliki, których potrzebuje ta wersja
 COPY app.py .
 COPY rss_sources.txt .
-COPY web_sources.txt .
 
 ENV PORT=8080
+# Sprawdzona komenda startowa dla wersji asynchronicznej
 CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "app:app"]
