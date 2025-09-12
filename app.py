@@ -80,7 +80,7 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed after retries.")
 
-# --- RSS / TG ---
+# --- RSS / TG (ASYNC FUNKCJE, ALE WYWOŁYWANE SYNCHRONICZNIE PRZEZ asyncio.run) ---
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f:
@@ -106,7 +106,7 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
         log.error(f"RSS error {url}: {e}")
         return []
 
-async def send_telegram_message(client: httpx.AsyncClient, title: str, link: str):
+async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str):
     if not TELEGRAM_API_URL:
         log.error("TG_TOKEN missing → skip send.")
         return
@@ -152,9 +152,8 @@ async def process_feeds_async() -> str:
         return "No new posts."
 
     async with httpx.AsyncClient() as client:
-        await asyncio.gather(*[send_telegram_message(client, t, l) for t, l in new_posts])
+        await asyncio.gather(*[send_telegram_message_async(client, t, l) for t, l in new_posts])
 
-    # (opcjonalnie: przytnij pamięć, np. do 5000 ostatnich)
     state["sent_links"] = list(sent)
     try:
         save_state_atomic(state, generation)
@@ -164,31 +163,34 @@ async def process_feeds_async() -> str:
 
     return f"Done. Sent {len(new_posts)} new posts."
 
-# --- ROUTES ---
+# --- ROUTES (WSZYSTKIE SYNCHRONICZNE) ---
 @app.get("/")
 def index():
-    # zmieniony tekst, żebyś widział NOWĄ rewizję po deployu
-    return "Travel-Bot vHEALTHZ-2 — działa", 200
+    return "Travel-Bot vSYNC-1 — działa", 200
 
 @app.get("/healthz")
 def healthz():
-    # prosta wersja: tylko „żyję”
     return jsonify({"status": "ok"}), 200
 
 @app.post("/tg/webhook")
-async def telegram_webhook():
+def telegram_webhook():
     update = request.get_json(silent=True) or {}
     msg = update.get("message", {})
     text = msg.get("text")
     if text == "/start":
-        async with httpx.AsyncClient() as client:
-            await send_telegram_message(client, title="Cześć!", link="Bot działa — poluję na okazje.")
+        # synchroniczne wywołanie async – jednorazowo
+        def _send():
+            async def _run():
+                async with httpx.AsyncClient() as client:
+                    await send_telegram_message_async(client, title="Cześć!", link="Bot działa — poluję na okazje.")
+            return asyncio.run(_run())
+        _send()
     return "OK", 200
 
 @app.post("/tasks/rss")
-async def handle_rss_task():
+def handle_rss_task():
     try:
-        result = await process_feeds_async()
+        result = asyncio.run(process_feeds_async())  # <-- synchronicznie wołamy async
         code = 200 if result and not result.lower().startswith("missing") else 500
         return result, code
     except Exception as e:
