@@ -13,7 +13,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiujemy wszystkie potrzebne pliki
+# Kopiujemy WSZYSTKIE pliki, których potrzebuje Twój hybrydowy kod
 COPY app.py .
 COPY rss_sources.txt .
 COPY web_sources.txt .
