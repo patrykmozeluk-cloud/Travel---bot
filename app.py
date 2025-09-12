@@ -12,6 +12,7 @@ from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
+from werkzeug.middleware.dispatcher import DispatcherMiddleware # <-- NOWOŚĆ: Nasz "tłumacz"
 
 # --- KONFIG ---
 TG_TOKEN = os.environ.get('TG_TOKEN')
@@ -69,34 +70,22 @@ def get_web_sources() -> List[str]:
     except FileNotFoundError: log.info("web_sources.txt not found. Skipping scraping."); return []
 
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
-    posts: List[Tuple[str, str]] = []
-    headers = { 'User-Agent': random.choice(USER_AGENTS) }
+    posts: List[Tuple[str, str]] = []; headers = { 'User-Agent': random.choice(USER_AGENTS) }
     try:
-        r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers)
-        r.raise_for_status()
+        r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers); r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
-        
         if "travel-dealz.com" in url:
             for article in soup.select('article.article-item'):
-                if (link_tag := article.select_one('h2.article-title a')) and (link := link_tag.get('href')):
-                    posts.append((link_tag.get_text(strip=True), link))
-        
+                if (link_tag := article.select_one('h2.article-title a')) and (link := link_tag.get('href')): posts.append((link_tag.get_text(strip=True), link))
         elif "secretflying.com" in url:
             for article in soup.select('article.post-item'):
-                if (link_tag := article.select_one('.post-title a')) and (link := link_tag.get('href')):
-                    posts.append((link_tag.get_text(strip=True), link))
-
+                if (link_tag := article.select_one('.post-title a')) and (link := link_tag.get('href')): posts.append((link_tag.get_text(strip=True), link))
         elif "wakacyjnipiraci.pl" in url:
             for article in soup.select('article.post-list__item'):
                 if (link_tag := article.select_one('a.post-list__link')) and (link := link_tag.get('href')):
-                    if title_tag := article.select_one('h2.post-list__title'):
-                        posts.append((title_tag.get_text(strip=True), link))
-
-        log.info(f"Scraped {len(posts)} posts from {url}")
-        return posts
-    except Exception as e:
-        log.error(f"Error scraping webpage {url}: {e}")
-        return []
+                    if title_tag := article.select_one('h2.post-list__title'): posts.append((title_tag.get_text(strip=True), link))
+        log.info(f"Scraped {len(posts)} posts from {url}"); return posts
+    except Exception as e: log.error(f"Error scraping webpage {url}: {e}"); return []
 
 def get_rss_sources() -> List[str]:
     try:
@@ -143,12 +132,8 @@ async def process_feeds_async() -> str:
     cleaned_sent_links = {}
     for link, ts in sent_links_dict.items():
         try:
-            if datetime.fromisoformat(ts) > thirty_days_ago:
-                cleaned_sent_links[link] = ts
-        except ValueError:
-            log.warning(f"Found invalid timestamp for link {link}, updating.")
-            cleaned_sent_links[link] = now_utc.isoformat()
-
+            if datetime.fromisoformat(ts) > thirty_days_ago: cleaned_sent_links[link] = ts
+        except ValueError: cleaned_sent_links[link] = now_utc.isoformat()
     log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
     state["sent_links"] = cleaned_sent_links
     
@@ -158,7 +143,7 @@ async def process_feeds_async() -> str:
     return f"Done. Sent {len(new_posts)} posts." if new_posts else "Done. No new posts."
 
 @app.get("/")
-def index(): return "Travel-Bot vHYBRID-FIXED — działa!", 200
+def index(): return "Travel-Bot vFINAL-FIXED — działa!", 200
 
 @app.get("/healthz")
 def healthz(): return jsonify({"status": "ok"}), 200
@@ -182,6 +167,13 @@ def handle_rss_task():
         return result, code
     except Exception as e: log.exception("Unhandled error in /tasks/rss"); return f"Server error: {e}", 500
 
+# --- NOWOŚĆ: Uruchamiamy "tłumacza", żeby Gunicorn/Uvicorn dogadał się z Flaskiem ---
+app.wsgi_app = DispatcherMiddleware(app.wsgi_app, {
+    '/': app
+})
+
 if __name__ == "__main__":
+    import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Uruchamiamy przez uvicorn, żeby lokalne testy działały tak samo jak w chmurze
+    uvicorn.run(app, host="0.0.0.0", port=port)
