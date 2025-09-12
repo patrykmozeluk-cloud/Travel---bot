@@ -9,10 +9,9 @@ from flask import Flask, request, jsonify
 from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from typing import Dict, Any, Tuple, List
-from datetime import datetime, timedelta, timezone # <-- NOWOŚĆ: Będziemy pracować z datami
+from datetime import datetime, timedelta, timezone
 
 # --- KONFIG ---
-# ... (ta sekcja pozostaje bez zmian)
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
@@ -22,7 +21,6 @@ HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
 
 # --- LOGI / APP / GCS / URL CANON ---
-# ... (te sekcje pozostają bez zmian)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 app = Flask(__name__)
@@ -32,7 +30,6 @@ _blob = _bucket.blob(SENT_LINKS_FILE)
 DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
 
 def canonicalize_url(url: str) -> str:
-    # ... (ta funkcja pozostaje bez zmian)
     try:
         p = urlparse(url.strip())
         scheme = p.scheme.lower() or "https"
@@ -43,9 +40,8 @@ def canonicalize_url(url: str) -> str:
     except Exception:
         return url.strip()
 
-# --- STAN (ZMIANY TUTAJ!) ---
+# --- STAN ---
 def _default_state() -> Dict[str, Any]:
-    # Zmieniamy strukturę: teraz to słownik z linkami i datami
     return {"sent_links": {}}
 
 def load_state() -> Tuple[Dict[str, Any], int | None]:
@@ -58,7 +54,6 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         generation = _blob.generation
         log.info(f"State file loaded successfully (generation: {generation}).")
         state_data = orjson.loads(data)
-        # Konwersja dla starych formatów - na wszelki wypadek
         if isinstance(state_data.get("sent_links"), list):
             log.warning("Old state format detected, converting to new format.")
             state_data["sent_links"] = {link: datetime.now(timezone.utc).isoformat() for link in state_data["sent_links"]}
@@ -68,7 +63,6 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         return _default_state(), None
 
 def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 5):
-    # ... (ta funkcja pozostaje bez zmian)
     payload = orjson.dumps(state)
     for attempt in range(retries):
         try:
@@ -88,8 +82,7 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed after multiple retries.")
 
-# --- RSS / TG (ZMIANY TUTAJ!) ---
-# ... (get_rss_sources, fetch_feed, send_telegram_message_async pozostają bez zmian)
+# --- RSS / TG ---
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f:
@@ -102,8 +95,13 @@ def get_rss_sources() -> List[str]:
 
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
+    # NOWOŚĆ: Udajemy normalną przeglądarkę, żeby uniknąć blokad
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
     try:
-        r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True)
+        # NOWOŚĆ: Dodajemy `headers` do naszego zapytania
+        r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers)
         r.raise_for_status()
         feed = feedparser.parse(r.text)
         for entry in feed.entries:
@@ -139,7 +137,6 @@ async def process_feeds_async() -> str:
         return "No RSS sources found to process."
 
     state, generation = load_state()
-    # Teraz `sent` to słownik, a my bierzemy z niego tylko klucze (linki) do sprawdzania
     sent_links_dict = state.get("sent_links", {})
     
     async with httpx.AsyncClient() as client:
@@ -150,14 +147,11 @@ async def process_feeds_async() -> str:
     for post_list in results: all_posts.extend(post_list)
 
     new_posts: List[Tuple[str, str]] = []
-    # <-- NOWOŚĆ: Będziemy potrzebować aktualnego czasu
     now_utc = datetime.now(timezone.utc)
     for title, link in all_posts:
         canonical = canonicalize_url(link)
-        # Sprawdzamy, czy linku nie ma w naszej pamięci
         if canonical not in sent_links_dict:
             new_posts.append((title, link))
-            # <-- NOWOŚĆ: Dodajemy link do pamięci RAZEM z datą
             sent_links_dict[canonical] = now_utc.isoformat()
 
     if not new_posts:
@@ -168,22 +162,18 @@ async def process_feeds_async() -> str:
             send_tasks = [send_telegram_message_async(client, t, l) for t, l in new_posts]
             await asyncio.gather(*send_tasks)
 
-    # <-- NOWOŚĆ: Logika samoczyszczenia!
     thirty_days_ago = now_utc - timedelta(days=30)
     cleaned_sent_links = {}
     for link, timestamp_str in sent_links_dict.items():
         try:
-            # Konwertujemy tekst na obiekt daty
             timestamp = datetime.fromisoformat(timestamp_str)
-            # Zostawiamy tylko te linki, które są nowsze niż 30 dni
             if timestamp > thirty_days_ago:
                 cleaned_sent_links[link] = timestamp_str
         except (TypeError, ValueError):
-            # Jeśli data jest w złym formacie, dodajemy ją z nową datą
             cleaned_sent_links[link] = now_utc.isoformat()
 
     log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
-    state["sent_links"] = cleaned_sent_links # Zapisujemy oczyszczoną wersję
+    state["sent_links"] = cleaned_sent_links
     
     try:
         save_state_atomic(state, generation)
@@ -197,10 +187,10 @@ async def process_feeds_async() -> str:
         return "Processing complete. No new posts."
 
 # --- ROUTES & MAIN ---
-# ... (ta sekcja pozostaje bez zmian)
 @app.get("/")
 def index():
-    return "Travel-Bot vCLEAN — działa!", 200 # Zmieniamy tekst, żeby wiedzieć, że to nowa wersja
+    # Nowa wersja, żeby wiedzieć, że bot ma "tryb niewidzialności"
+    return "Travel-Bot vSTEALTH — działa!", 200
 
 @app.get("/healthz")
 def healthz():
