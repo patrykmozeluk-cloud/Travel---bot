@@ -13,7 +13,7 @@ from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 
-# --- KONFIG I CAŁA RESZTA BEZ ZMIAN ---
+# --- KONFIG ---
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
@@ -34,11 +34,14 @@ storage_client = storage.Client()
 _bucket = storage_client.bucket(BUCKET_NAME)
 _blob = _bucket.blob(SENT_LINKS_FILE)
 DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
+
 def canonicalize_url(url: str) -> str:
     try:
         p = urlparse(url.strip()); scheme = p.scheme.lower() or "https"; netloc = p.netloc.lower(); path = p.path or "/"; q = sorted([(k, v) for k, v in parse_qsl(p.query) if k.lower() not in DROP_PARAMS]); return urlunparse((scheme, netloc, path, p.params, urlencode(q), ""))
     except Exception: return url.strip()
+
 def _default_state() -> Dict[str, Any]: return {"sent_links": {}}
+
 def load_state() -> Tuple[Dict[str, Any], int | None]:
     try:
         if not _blob.exists(): return _default_state(), None
@@ -47,6 +50,7 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         if isinstance(state_data.get("sent_links"), list): state_data["sent_links"] = {link: datetime.now(timezone.utc).isoformat() for link in state_data["sent_links"]}
         return state_data, generation
     except Exception: return _default_state(), None
+
 def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 5):
     payload = orjson.dumps(state)
     for attempt in range(retries):
@@ -59,16 +63,10 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed.")
 
-# --- LOGIKA SCRAPINGU ---
 def get_web_sources() -> List[str]:
     try:
-        with open('web_sources.txt', 'r', encoding='utf-8') as f:
-            sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-        log.info(f"Found {len(sources)} web sources for scraping.")
-        return sources
-    except FileNotFoundError:
-        log.info("web_sources.txt not found. Skipping scraping.")
-        return []
+        with open('web_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} web sources for scraping."); return sources
+    except FileNotFoundError: log.info("web_sources.txt not found. Skipping scraping."); return []
 
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
@@ -100,11 +98,11 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         log.error(f"Error scraping webpage {url}: {e}")
         return []
 
-# --- RSS / TG / GŁÓWNA LOGIKA / ROUTES ---
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} RSS sources."); return sources
     except FileNotFoundError: log.error("CRITICAL: rss_sources.txt not found."); return []
+
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []; headers = { 'User-Agent': random.choice(USER_AGENTS) }
     try:
@@ -114,6 +112,7 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             if (t := entry.get("title")) and (l := entry.get("link")): posts.append((t, l))
         log.info(f"Fetched {len(posts)} posts from {url}"); return posts
     except Exception as e: log.error(f"Error fetching RSS feed {url}: {e}"); return []
+
 async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str):
     if not TELEGRAM_API_URL: log.error("TG_TOKEN is not set."); return
     message = f"<b>{title}</b>\n\n{link}"; payload = {'chat_id': TG_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
@@ -121,6 +120,7 @@ async def send_telegram_message_async(client: httpx.AsyncClient, title: str, lin
         r = await client.post(TELEGRAM_API_URL, json=payload, timeout=HTTP_TIMEOUT); r.raise_for_status()
         log.info(f"Message sent: {title[:80]}…")
     except Exception as e: log.error(f"Telegram error for link {link}: {e}")
+
 async def process_feeds_async() -> str:
     log.info("Starting hybrid processing (RSS + Scraping).")
     if not TG_TOKEN or not TG_CHAT_ID: return "Missing TG_TOKEN/TG_CHAT_ID."
@@ -138,32 +138,50 @@ async def process_feeds_async() -> str:
     if new_posts:
         log.info(f"Found {len(new_posts)} new posts. Sending.")
         async with httpx.AsyncClient() as client: await asyncio.gather(*[send_telegram_message_async(client, t, l) for t, l in new_posts])
+    
     thirty_days_ago = now_utc - timedelta(days=30)
-    cleaned_sent_links = {link: ts for link, ts in sent_links_dict.items() if datetime.fromisoformat(ts) > thirty_days_ago}
+    cleaned_sent_links = {}
+    for link, ts in sent_links_dict.items():
+        try:
+            if datetime.fromisoformat(ts) > thirty_days_ago:
+                cleaned_sent_links[link] = ts
+        except ValueError:
+            log.warning(f"Found invalid timestamp for link {link}, updating.")
+            cleaned_sent_links[link] = now_utc.isoformat()
+
     log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
     state["sent_links"] = cleaned_sent_links
+    
     try: save_state_atomic(state, generation)
     except RuntimeError as e: log.critical(f"State save failure: {e}"); return f"Critical: {e}"
+    
     return f"Done. Sent {len(new_posts)} posts." if new_posts else "Done. No new posts."
+
 @app.get("/")
-def index(): return "Travel-Bot vHYBRID-2 — działa!", 200 # Zmieniamy, żeby wiedzieć, że to nowa wersja
+def index(): return "Travel-Bot vHYBRID-FIXED — działa!", 200
+
 @app.get("/healthz")
 def healthz(): return jsonify({"status": "ok"}), 200
+
 @app.post("/tg/webhook")
 def telegram_webhook():
-    update = request.get_json(silent=True) or {}; msg = update.get("message", {}); text = msg.get("text")
-    if text == "/start":
+    update = request.get_json(silent=True) or {}
+    if (msg := update.get("message", {})) and msg.get("text") == "/start":
         def _send():
             async def _run():
                 async with httpx.AsyncClient() as client: await send_telegram_message_async(client, title="Cześć!", link="Bot działa — poluję na okazje i sam po sobie sprzątam.")
             asyncio.run(_run())
         _send()
     return "OK", 200
+
 @app.post("/tasks/rss")
 def handle_rss_task():
-    log.info("Received request on /tasks/rss endpoint.")
     try:
-        result = asyncio.run(process_feeds_async()); code = 200 if "Critical" not in result else 500
+        result = asyncio.run(process_feeds_async())
+        code = 200 if "Critical" not in result else 500
         return result, code
     except Exception as e: log.exception("Unhandled error in /tasks/rss"); return f"Server error: {e}", 500
-if __name__ == "__main__": port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port, debug=True)```
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port, debug=True)
