@@ -13,10 +13,11 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiujemy tylko te pliki, których potrzebuje ta wersja
+# Kopiujemy wszystkie potrzebne pliki
 COPY app.py .
 COPY rss_sources.txt .
+COPY web_sources.txt .
 
 ENV PORT=8080
-# Sprawdzona komenda startowa dla wersji asynchronicznej
-CMD ["gunicorn", "--bind", "0.0.0.0:8080", "--workers", "1", "--worker-class", "uvicorn.workers.UvicornWorker", "app:app"]
+# Klasyczna, pancerna komenda startowa dla synchronicznego bota
+CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 120 --worker-tmp-dir /dev/shm app:app
