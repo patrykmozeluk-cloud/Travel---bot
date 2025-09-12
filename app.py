@@ -9,29 +9,30 @@ from flask import Flask, request, jsonify
 from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from typing import Dict, Any, Tuple, List
+from datetime import datetime, timedelta, timezone # <-- NOWOŚĆ: Będziemy pracować z datami
 
 # --- KONFIG ---
+# ... (ta sekcja pozostaje bez zmian)
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
 SENT_LINKS_FILE = os.environ.get('SENT_LINKS_FILE', 'sent_links.json')
-HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0")) # Lekko zwiększony timeout
+HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
 
-# --- LOGI ---
+# --- LOGI / APP / GCS / URL CANON ---
+# ... (te sekcje pozostają bez zmian)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
-
-# --- APP / GCS ---
 app = Flask(__name__)
 storage_client = storage.Client()
 _bucket = storage_client.bucket(BUCKET_NAME)
 _blob = _bucket.blob(SENT_LINKS_FILE)
-
-# --- URL CANON ---
 DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
+
 def canonicalize_url(url: str) -> str:
+    # ... (ta funkcja pozostaje bez zmian)
     try:
         p = urlparse(url.strip())
         scheme = p.scheme.lower() or "https"
@@ -42,9 +43,10 @@ def canonicalize_url(url: str) -> str:
     except Exception:
         return url.strip()
 
-# --- STAN ---
+# --- STAN (ZMIANY TUTAJ!) ---
 def _default_state() -> Dict[str, Any]:
-    return {"sent_links": []}
+    # Zmieniamy strukturę: teraz to słownik z linkami i datami
+    return {"sent_links": {}}
 
 def load_state() -> Tuple[Dict[str, Any], int | None]:
     try:
@@ -55,12 +57,18 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         data = _blob.download_as_bytes()
         generation = _blob.generation
         log.info(f"State file loaded successfully (generation: {generation}).")
-        return orjson.loads(data), generation
+        state_data = orjson.loads(data)
+        # Konwersja dla starych formatów - na wszelki wypadek
+        if isinstance(state_data.get("sent_links"), list):
+            log.warning("Old state format detected, converting to new format.")
+            state_data["sent_links"] = {link: datetime.now(timezone.utc).isoformat() for link in state_data["sent_links"]}
+        return state_data, generation
     except Exception as e:
         log.error(f"Error reading from GCS: {e}. Starting with an empty state.")
         return _default_state(), None
 
 def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 5):
+    # ... (ta funkcja pozostaje bez zmian)
     payload = orjson.dumps(state)
     for attempt in range(retries):
         try:
@@ -80,7 +88,8 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed after multiple retries.")
 
-# --- RSS / TG ---
+# --- RSS / TG (ZMIANY TUTAJ!) ---
+# ... (get_rss_sources, fetch_feed, send_telegram_message_async pozostają bez zmian)
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f:
@@ -130,8 +139,9 @@ async def process_feeds_async() -> str:
         return "No RSS sources found to process."
 
     state, generation = load_state()
-    sent = set(state.get("sent_links", []))
-
+    # Teraz `sent` to słownik, a my bierzemy z niego tylko klucze (linki) do sprawdzania
+    sent_links_dict = state.get("sent_links", {})
+    
     async with httpx.AsyncClient() as client:
         fetch_tasks = [fetch_feed(client, url) for url in rss]
         results = await asyncio.gather(*fetch_tasks)
@@ -140,35 +150,57 @@ async def process_feeds_async() -> str:
     for post_list in results: all_posts.extend(post_list)
 
     new_posts: List[Tuple[str, str]] = []
+    # <-- NOWOŚĆ: Będziemy potrzebować aktualnego czasu
+    now_utc = datetime.now(timezone.utc)
     for title, link in all_posts:
         canonical = canonicalize_url(link)
-        if canonical not in sent:
+        # Sprawdzamy, czy linku nie ma w naszej pamięci
+        if canonical not in sent_links_dict:
             new_posts.append((title, link))
-            sent.add(canonical)
+            # <-- NOWOŚĆ: Dodajemy link do pamięci RAZEM z datą
+            sent_links_dict[canonical] = now_utc.isoformat()
 
     if not new_posts:
-        log.info("Processing complete. No new posts found.")
-        return "No new posts."
+        log.info("No new posts found.")
+    else:
+        log.info(f"Found {len(new_posts)} new posts. Preparing to send to Telegram.")
+        async with httpx.AsyncClient() as client:
+            send_tasks = [send_telegram_message_async(client, t, l) for t, l in new_posts]
+            await asyncio.gather(*send_tasks)
 
-    log.info(f"Found {len(new_posts)} new posts. Preparing to send to Telegram.")
-    async with httpx.AsyncClient() as client:
-        send_tasks = [send_telegram_message_async(client, t, l) for t, l in new_posts]
-        await asyncio.gather(*send_tasks)
+    # <-- NOWOŚĆ: Logika samoczyszczenia!
+    thirty_days_ago = now_utc - timedelta(days=30)
+    cleaned_sent_links = {}
+    for link, timestamp_str in sent_links_dict.items():
+        try:
+            # Konwertujemy tekst na obiekt daty
+            timestamp = datetime.fromisoformat(timestamp_str)
+            # Zostawiamy tylko te linki, które są nowsze niż 30 dni
+            if timestamp > thirty_days_ago:
+                cleaned_sent_links[link] = timestamp_str
+        except (TypeError, ValueError):
+            # Jeśli data jest w złym formacie, dodajemy ją z nową datą
+            cleaned_sent_links[link] = now_utc.isoformat()
 
-    state["sent_links"] = list(sent)
+    log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
+    state["sent_links"] = cleaned_sent_links # Zapisujemy oczyszczoną wersję
+    
     try:
         save_state_atomic(state, generation)
     except RuntimeError as e:
         log.critical(f"Failed to save state after sending messages: {e}")
         return f"Critical error: {e}"
 
-    return f"Processing complete. Sent {len(new_posts)} new posts to Telegram."
+    if new_posts:
+        return f"Processing complete. Sent {len(new_posts)} new posts to Telegram."
+    else:
+        return "Processing complete. No new posts."
 
-# --- ROUTES ---
+# --- ROUTES & MAIN ---
+# ... (ta sekcja pozostaje bez zmian)
 @app.get("/")
 def index():
-    # Zmieniony tekst, żebyśmy mieli 100% pewności, że nowa wersja się wdrożyła
-    return "Travel-Bot vFINAL — działa!", 200
+    return "Travel-Bot vCLEAN — działa!", 200 # Zmieniamy tekst, żeby wiedzieć, że to nowa wersja
 
 @app.get("/healthz")
 def healthz():
@@ -183,7 +215,7 @@ def telegram_webhook():
         def _send():
             async def _run():
                 async with httpx.AsyncClient() as client:
-                    await send_telegram_message_async(client, title="Cześć!", link="Bot działa — poluję na okazje.")
+                    await send_telegram_message_async(client, title="Cześć!", link="Bot działa — poluję na okazje i sam po sobie sprzątam.")
             return asyncio.run(_run())
         _send()
     return "OK", 200
@@ -192,7 +224,6 @@ def telegram_webhook():
 def handle_rss_task():
     log.info("Received request on /tasks/rss endpoint.")
     try:
-        # Synchroniczne uruchomienie głównej logiki asynchronicznej
         result = asyncio.run(process_feeds_async())
         log.info(f"RSS task finished with result: {result}")
         code = 200
