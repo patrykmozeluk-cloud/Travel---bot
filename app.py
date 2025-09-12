@@ -16,7 +16,7 @@ TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 
 # WAŻNE: Wpisz tutaj DOKŁADNIE tę samą nazwę bucketa, którą stworzyłeś w Google Cloud
-BUCKET_NAME = 'travel-bot-storage-patrykmozeluk-cloud'
+BUCKET_NAME = 'travel-bot-storage-patrykmozeluk-cloud' # <-- UPEWNIJ SIĘ, ŻE TA NAZWA JEST POPRAWNA!
 SENT_LINKS_FILE = 'sent_links.json' # Nazwa pliku "pamięci" w buckecie
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
@@ -202,5 +202,4 @@ async def handle_rss_task():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    # 'debug=True' jest świetne do testów lokalnych, ale gunicorn (używany w Cloud Run) go ignoruje
     app.run(debug=True, host="0.0.0.0", port=port)
