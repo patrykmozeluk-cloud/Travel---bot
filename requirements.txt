@@ -1,8 +1,8 @@
-Flask==3.0.3
-gunicorn==22.0.0
-google-cloud-storage==2.18.2
-httpx==0.27.2
-feedparser==6.0.11
-orjson==3.10.7
-uvicorn
+flask
+gunicorn
+httpx[http2]
+feedparser
+orjson
 beautifulsoup4
+google-cloud-storage
+
