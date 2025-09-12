@@ -11,17 +11,16 @@ from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
 from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
-from bs4 import BeautifulSoup # <-- NOWOŚĆ: Nasze narzędzie do scrapingu
+from bs4 import BeautifulSoup
 
-# --- KONFIG ---
+# --- KONFIG I CAŁA RESZTA BEZ ZMIAN ---
+# ... (Wszystkie sekcje aż do "LOGIKA SCRAPINGU" pozostają identyczne)
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
 SENT_LINKS_FILE = os.environ.get('SENT_LINKS_FILE', 'sent_links.json')
 HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
-
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
-
 USER_AGENTS = [
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
     'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
@@ -29,9 +28,6 @@ USER_AGENTS = [
     'Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Mobile Safari/537.36',
     'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
 ]
-
-# --- LOGI / APP / GCS / URL CANON ---
-# ... (ta sekcja pozostaje bez zmian)
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 app = Flask(__name__)
@@ -40,13 +36,9 @@ _bucket = storage_client.bucket(BUCKET_NAME)
 _blob = _bucket.blob(SENT_LINKS_FILE)
 DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
 def canonicalize_url(url: str) -> str:
-    # ... (ta funkcja pozostaje bez zmian)
     try:
         p = urlparse(url.strip()); scheme = p.scheme.lower() or "https"; netloc = p.netloc.lower(); path = p.path or "/"; q = sorted([(k, v) for k, v in parse_qsl(p.query) if k.lower() not in DROP_PARAMS]); return urlunparse((scheme, netloc, path, p.params, urlencode(q), ""))
     except Exception: return url.strip()
-
-# --- STAN ---
-# ... (cała sekcja "STAN" pozostaje bez zmian)
 def _default_state() -> Dict[str, Any]: return {"sent_links": {}}
 def load_state() -> Tuple[Dict[str, Any], int | None]:
     try:
@@ -68,49 +60,51 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed.")
 
-# --- NOWOŚĆ: LOGIKA SCRAPINGU ---
+# --- LOGIKA SCRAPINGU (ZMIANY TUTAJ!) ---
 
 def get_web_sources() -> List[str]:
-    """Odczytuje listę stron do scrapowania z pliku web_sources.txt."""
+    # ... (ta funkcja pozostaje bez zmian)
     try:
-        with open('web_sources.txt', 'r', encoding='utf-8') as f:
-            sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-        log.info(f"Found {len(sources)} web sources for scraping.")
-        return sources
-    except FileNotFoundError:
-        log.info("web_sources.txt not found. Skipping scraping.")
-        return []
+        with open('web_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} web sources for scraping."); return sources
+    except FileNotFoundError: log.info("web_sources.txt not found. Skipping scraping."); return []
 
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
-    """Pobiera i scrapuje jedną stronę internetową, zwracając listę (tytuł, link)."""
     posts: List[Tuple[str, str]] = []
     headers = { 'User-Agent': random.choice(USER_AGENTS) }
     try:
         r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers)
         r.raise_for_status()
-        
         soup = BeautifulSoup(r.text, 'html.parser')
         
         # --- Specyficzna logika dla travel-dealz.com ---
         if "travel-dealz.com" in url:
-            # Szukamy wszystkich artykułów na stronie
             for article in soup.select('article.article-item'):
-                # Wewnątrz artykułu szukamy linku w nagłówku
-                link_tag = article.select_one('h2.article-title a')
-                if link_tag and link_tag.has_attr('href'):
-                    link = link_tag['href']
-                    title = link_tag.get_text(strip=True)
-                    posts.append((title, link))
-        # --- Można tu w przyszłości dodać logikę dla innych stron (elif "inna-strona.com" in url:) ---
+                if link_tag := article.select_one('h2.article-title a'):
+                    if link := link_tag.get('href'): posts.append((link_tag.get_text(strip=True), link))
         
+        # --- NOWOŚĆ: Specyficzna logika dla secretflying.com ---
+        elif "secretflying.com" in url:
+            for article in soup.select('article.post-item'):
+                if link_tag := article.select_one('.post-title a'):
+                    if link := link_tag.get('href'): posts.append((link_tag.get_text(strip=True), link))
+
+        # --- NOWOŚĆ: Specyficzna logika dla wakacyjnipiraci.pl ---
+        elif "wakacyjnipiraci.pl" in url:
+            for article in soup.select('article.post-list__item'):
+                if link_tag := article.select_one('a.post-list__link'):
+                     if link := link_tag.get('href'):
+                        # Tytuł jest w innym miejscu
+                        if title_tag := article.select_one('h2.post-list__title'):
+                            posts.append((title_tag.get_text(strip=True), link))
+
         log.info(f"Scraped {len(posts)} posts from {url}")
         return posts
     except Exception as e:
         log.error(f"Error scraping webpage {url}: {e}")
         return []
 
-# --- RSS / TG ---
-# ... (funkcje get_rss_sources, fetch_feed, send_telegram_message_async pozostają bez zmian)
+# --- RSS / TG / GŁÓWNA LOGIKA / ROUTES ---
+# ... (reszta kodu pozostaje DOKŁADNIE taka sama)
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} RSS sources."); return sources
@@ -131,63 +125,32 @@ async def send_telegram_message_async(client: httpx.AsyncClient, title: str, lin
         r = await client.post(TELEGRAM_API_URL, json=payload, timeout=HTTP_TIMEOUT); r.raise_for_status()
         log.info(f"Message sent: {title[:80]}…")
     except Exception as e: log.error(f"Telegram error for link {link}: {e}")
-
-# --- GŁÓWNA LOGIKA (ZMIANY TUTAJ!) ---
-
 async def process_feeds_async() -> str:
     log.info("Starting hybrid processing (RSS + Scraping).")
     if not TG_TOKEN or not TG_CHAT_ID: return "Missing TG_TOKEN/TG_CHAT_ID."
-
-    rss_sources = get_rss_sources()
-    web_sources = get_web_sources() # <-- NOWOŚĆ: Wczytujemy strony do scrapowania
-    
-    if not rss_sources and not web_sources:
-        return "No RSS or Web sources found to process."
-
-    state, generation = load_state()
-    sent_links_dict = state.get("sent_links", {})
-    
+    rss_sources = get_rss_sources(); web_sources = get_web_sources()
+    if not rss_sources and not web_sources: return "No RSS or Web sources found."
+    state, generation = load_state(); sent_links_dict = state.get("sent_links", {})
     async with httpx.AsyncClient() as client:
-        # Tworzymy zadania dla RSS i dla Scrapingu
-        rss_tasks = [fetch_feed(client, url) for url in rss_sources]
-        scrape_tasks = [scrape_webpage(client, url) for url in web_sources] # <-- NOWOŚĆ
-        
-        # Uruchamiamy WSZYSTKO na raz!
-        all_tasks = rss_tasks + scrape_tasks
-        results = await asyncio.gather(*all_tasks)
-
-    all_posts: List[Tuple[str, str]] = []
-    for post_list in results: all_posts.extend(post_list)
-
-    new_posts: List[Tuple[str, str]] = []
-    now_utc = datetime.now(timezone.utc)
+        rss_tasks = [fetch_feed(client, url) for url in rss_sources]; scrape_tasks = [scrape_webpage(client, url) for url in web_sources]
+        results = await asyncio.gather(*(rss_tasks + scrape_tasks))
+    all_posts = [post for post_list in results for post in post_list]
+    new_posts, now_utc = [], datetime.now(timezone.utc)
     for title, link in all_posts:
         canonical = canonicalize_url(link)
-        if canonical not in sent_links_dict:
-            new_posts.append((title, link))
-            sent_links_dict[canonical] = now_utc.isoformat()
-
-    if not new_posts: log.info("No new posts found.")
-    else:
-        log.info(f"Found {len(new_posts)} new posts. Preparing to send.")
-        async with httpx.AsyncClient() as client:
-            await asyncio.gather(*[send_telegram_message_async(client, t, l) for t, l in new_posts])
-
+        if canonical not in sent_links_dict: new_posts.append((title, link)); sent_links_dict[canonical] = now_utc.isoformat()
+    if new_posts:
+        log.info(f"Found {len(new_posts)} new posts. Sending.")
+        async with httpx.AsyncClient() as client: await asyncio.gather(*[send_telegram_message_async(client, t, l) for t, l in new_posts])
     thirty_days_ago = now_utc - timedelta(days=30)
     cleaned_sent_links = {link: ts for link, ts in sent_links_dict.items() if datetime.fromisoformat(ts) > thirty_days_ago}
     log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
     state["sent_links"] = cleaned_sent_links
-    
     try: save_state_atomic(state, generation)
     except RuntimeError as e: log.critical(f"State save failure: {e}"); return f"Critical: {e}"
-
     return f"Done. Sent {len(new_posts)} posts." if new_posts else "Done. No new posts."
-
-# --- ROUTES & MAIN ---
 @app.get("/")
-def index():
-    return "Travel-Bot vSCRAPER — działa!", 200 # Nowa wersja, żeby wiedzieć, że to scraper
-
+def index(): return "Travel-Bot vHYBRID — działa!", 200 # Nowa wersja, żeby wiedzieć, że to scraper i czytnik RSS
 @app.get("/healthz")
 def healthz(): return jsonify({"status": "ok"}), 200
 @app.post("/tg/webhook")
