@@ -1,0 +1,17 @@
+name: Check RSS feeds every 15 minutes
+
+on:
+  schedule:
+    # Uruchamia się co 15 minut
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+    # Pozwala na ręczne uruchomienie z panelu Actions
+
+jobs:
+  check-feeds:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger the bot
+        run: |
+          curl -X POST ${{ secrets.RUN_URL }}/tasks/rss
+          
