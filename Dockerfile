@@ -1,23 +1,26 @@
-# syntax=docker/dockerfile:1.7
-FROM python:3.12-slim
+# bazowy Python
+FROM python:3.11-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1
+# zmienne środowiskowe
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PORT=8080
 
+# instalacja zależności systemowych (certyfikaty SSL itd.)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates curl && \
-    rm -rf /var/lib/apt/lists/*
+    build-essential \
+    libffi-dev \
+    && rm -rf /var/lib/apt/lists/*
 
+# katalog aplikacji
 WORKDIR /app
 
+# kopiuj requirements i zainstaluj
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Kopiujemy WSZYSTKIE pliki, których potrzebuje Twój hybrydowy kod
-COPY app.py .
-COPY rss_sources.txt .
-COPY web_sources.txt .
+# kopiuj kod źródłowy
+COPY . .
 
-ENV PORT=8080
-# Klasyczna, pancerna komenda startowa dla synchronicznego bota
-CMD exec gunicorn --bind :$PORT --workers 1 --threads 8 --timeout 120 --worker-tmp-dir /dev/shm app:app
+# gunicorn jako server (gthread dla async)
+CMD ["gunicorn", "-b", "0.0.0.0:8080", "--workers=1", "--threads=8", "app:app"]
