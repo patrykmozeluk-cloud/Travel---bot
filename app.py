@@ -14,7 +14,6 @@ from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 
 # --- KONFIG I CAŁA RESZTA BEZ ZMIAN ---
-# ... (Wszystkie sekcje aż do "LOGIKA SCRAPINGU" pozostają identyczne)
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
@@ -60,13 +59,16 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed.")
 
-# --- LOGIKA SCRAPINGU (ZMIANY TUTAJ!) ---
-
+# --- LOGIKA SCRAPINGU ---
 def get_web_sources() -> List[str]:
-    # ... (ta funkcja pozostaje bez zmian)
     try:
-        with open('web_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} web sources for scraping."); return sources
-    except FileNotFoundError: log.info("web_sources.txt not found. Skipping scraping."); return []
+        with open('web_sources.txt', 'r', encoding='utf-8') as f:
+            sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
+        log.info(f"Found {len(sources)} web sources for scraping.")
+        return sources
+    except FileNotFoundError:
+        log.info("web_sources.txt not found. Skipping scraping.")
+        return []
 
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
@@ -76,26 +78,21 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
         
-        # --- Specyficzna logika dla travel-dealz.com ---
         if "travel-dealz.com" in url:
             for article in soup.select('article.article-item'):
-                if link_tag := article.select_one('h2.article-title a'):
-                    if link := link_tag.get('href'): posts.append((link_tag.get_text(strip=True), link))
+                if (link_tag := article.select_one('h2.article-title a')) and (link := link_tag.get('href')):
+                    posts.append((link_tag.get_text(strip=True), link))
         
-        # --- NOWOŚĆ: Specyficzna logika dla secretflying.com ---
         elif "secretflying.com" in url:
             for article in soup.select('article.post-item'):
-                if link_tag := article.select_one('.post-title a'):
-                    if link := link_tag.get('href'): posts.append((link_tag.get_text(strip=True), link))
+                if (link_tag := article.select_one('.post-title a')) and (link := link_tag.get('href')):
+                    posts.append((link_tag.get_text(strip=True), link))
 
-        # --- NOWOŚĆ: Specyficzna logika dla wakacyjnipiraci.pl ---
         elif "wakacyjnipiraci.pl" in url:
             for article in soup.select('article.post-list__item'):
-                if link_tag := article.select_one('a.post-list__link'):
-                     if link := link_tag.get('href'):
-                        # Tytuł jest w innym miejscu
-                        if title_tag := article.select_one('h2.post-list__title'):
-                            posts.append((title_tag.get_text(strip=True), link))
+                if (link_tag := article.select_one('a.post-list__link')) and (link := link_tag.get('href')):
+                    if title_tag := article.select_one('h2.post-list__title'):
+                        posts.append((title_tag.get_text(strip=True), link))
 
         log.info(f"Scraped {len(posts)} posts from {url}")
         return posts
@@ -104,7 +101,6 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         return []
 
 # --- RSS / TG / GŁÓWNA LOGIKA / ROUTES ---
-# ... (reszta kodu pozostaje DOKŁADNIE taka sama)
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f: sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]; log.info(f"Found {len(sources)} RSS sources."); return sources
@@ -150,7 +146,7 @@ async def process_feeds_async() -> str:
     except RuntimeError as e: log.critical(f"State save failure: {e}"); return f"Critical: {e}"
     return f"Done. Sent {len(new_posts)} posts." if new_posts else "Done. No new posts."
 @app.get("/")
-def index(): return "Travel-Bot vHYBRID — działa!", 200 # Nowa wersja, żeby wiedzieć, że to scraper i czytnik RSS
+def index(): return "Travel-Bot vHYBRID-2 — działa!", 200 # Zmieniamy, żeby wiedzieć, że to nowa wersja
 @app.get("/healthz")
 def healthz(): return jsonify({"status": "ok"}), 200
 @app.post("/tg/webhook")
@@ -170,4 +166,4 @@ def handle_rss_task():
         result = asyncio.run(process_feeds_async()); code = 200 if "Critical" not in result else 500
         return result, code
     except Exception as e: log.exception("Unhandled error in /tasks/rss"); return f"Server error: {e}", 500
-if __name__ == "__main__": port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port, debug=True)
+if __name__ == "__main__": port = int(os.environ.get("PORT", 8080)); app.run(host="0.0.0.0", port=port, debug=True)```
