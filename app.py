@@ -15,7 +15,7 @@ TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
 SENT_LINKS_FILE = os.environ.get('SENT_LINKS_FILE', 'sent_links.json')
-HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "15.0"))
+HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0")) # Lekko zwiększony timeout
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
 
@@ -49,15 +49,15 @@ def _default_state() -> Dict[str, Any]:
 def load_state() -> Tuple[Dict[str, Any], int | None]:
     try:
         if not _blob.exists():
-            log.info("State not found → default.")
+            log.info("State file not found, creating a default one.")
             return _default_state(), None
         _blob.reload()
         data = _blob.download_as_bytes()
         generation = _blob.generation
-        log.info(f"State loaded (gen={generation}).")
+        log.info(f"State file loaded successfully (generation: {generation}).")
         return orjson.loads(data), generation
     except Exception as e:
-        log.error(f"GCS read error: {e} → default.")
+        log.error(f"Error reading from GCS: {e}. Starting with an empty state.")
         return _default_state(), None
 
 def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 5):
@@ -68,27 +68,27 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
                 _blob.upload_from_string(payload, if_generation_match=0, content_type="application/json")
             else:
                 _blob.upload_from_string(payload, if_generation_match=expected_generation, content_type="application/json")
-            log.info("State saved.")
+            log.info("State file saved successfully.")
             return
         except Exception as e:
             if "PreconditionFailed" in str(e) or "412" in str(e):
-                log.warning(f"GCS conflict (attempt {attempt+1}/{retries}) → reload gen")
+                log.warning(f"GCS write conflict (attempt {attempt+1}/{retries}). Reloading state generation and retrying.")
                 time.sleep(0.5)
                 _, expected_generation = load_state()
                 continue
-            log.error(f"GCS write error: {e}")
+            log.error(f"Critical error writing to GCS: {e}")
             raise
-    raise RuntimeError("Atomic save failed after retries.")
+    raise RuntimeError("Atomic save failed after multiple retries.")
 
-# --- RSS / TG (ASYNC FUNKCJE, ALE WYWOŁYWANE SYNCHRONICZNIE PRZEZ asyncio.run) ---
+# --- RSS / TG ---
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f:
             sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-        log.info(f"RSS sources: {len(sources)}")
+        log.info(f"Found {len(sources)} RSS sources in rss_sources.txt.")
         return sources
     except FileNotFoundError:
-        log.error("rss_sources.txt not found in container.")
+        log.error("CRITICAL: rss_sources.txt not found in the container.")
         return []
 
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
@@ -100,73 +100,75 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
         for entry in feed.entries:
             t = entry.get("title"); l = entry.get("link")
             if t and l: posts.append((t, l))
-        log.info(f"Fetched {len(posts)} from {url}")
+        log.info(f"Fetched {len(posts)} posts from {url}")
         return posts
     except Exception as e:
-        log.error(f"RSS error {url}: {e}")
+        log.error(f"Error fetching RSS feed {url}: {e}")
         return []
 
 async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str):
     if not TELEGRAM_API_URL:
-        log.error("TG_TOKEN missing → skip send.")
+        log.error("TG_TOKEN is not set. Cannot send Telegram message.")
         return
     message = f"<b>{title}</b>\n\n{link}"
     payload = {'chat_id': TG_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
     try:
         r = await client.post(TELEGRAM_API_URL, json=payload, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
-        log.info(f"Sent: {title[:80]}…")
+        log.info(f"Message sent to Telegram: {title[:80]}…")
     except Exception as e:
-        log.error(f"Telegram send error for {link}: {e}")
+        log.error(f"Error sending Telegram message for link {link}: {e}")
 
 async def process_feeds_async() -> str:
+    log.info("Starting asynchronous feed processing.")
     if not TG_TOKEN or not TG_CHAT_ID:
+        log.error("Missing TG_TOKEN or TG_CHAT_ID environment variables. Aborting.")
         return "Missing TG_TOKEN/TG_CHAT_ID env."
 
     rss = get_rss_sources()
     if not rss:
-        return "No RSS sources."
+        return "No RSS sources found to process."
 
     state, generation = load_state()
     sent = set(state.get("sent_links", []))
 
-    sem = asyncio.Semaphore(int(os.environ.get("CONCURRENCY", "6")))
     async with httpx.AsyncClient() as client:
-        async def _task(u: str):
-            async with sem:
-                return await fetch_feed(client, u)
-        results = await asyncio.gather(*[_task(u) for u in rss])
+        fetch_tasks = [fetch_feed(client, url) for url in rss]
+        results = await asyncio.gather(*fetch_tasks)
 
     all_posts: List[Tuple[str, str]] = []
-    for lst in results: all_posts.extend(lst)
+    for post_list in results: all_posts.extend(post_list)
 
     new_posts: List[Tuple[str, str]] = []
     for title, link in all_posts:
-        c = canonicalize_url(link)
-        if c not in sent:
+        canonical = canonicalize_url(link)
+        if canonical not in sent:
             new_posts.append((title, link))
-            sent.add(c)
+            sent.add(canonical)
 
     if not new_posts:
-        log.info("No new posts.")
+        log.info("Processing complete. No new posts found.")
         return "No new posts."
 
+    log.info(f"Found {len(new_posts)} new posts. Preparing to send to Telegram.")
     async with httpx.AsyncClient() as client:
-        await asyncio.gather(*[send_telegram_message_async(client, t, l) for t, l in new_posts])
+        send_tasks = [send_telegram_message_async(client, t, l) for t, l in new_posts]
+        await asyncio.gather(*send_tasks)
 
     state["sent_links"] = list(sent)
     try:
         save_state_atomic(state, generation)
     except RuntimeError as e:
-        log.critical(f"State save failure: {e}")
-        return f"Critical: {e}"
+        log.critical(f"Failed to save state after sending messages: {e}")
+        return f"Critical error: {e}"
 
-    return f"Done. Sent {len(new_posts)} new posts."
+    return f"Processing complete. Sent {len(new_posts)} new posts to Telegram."
 
-# --- ROUTES (WSZYSTKIE SYNCHRONICZNE) ---
+# --- ROUTES ---
 @app.get("/")
 def index():
-    return "Travel-Bot vSYNC-1 — działa", 200
+    # Zmieniony tekst, żebyśmy mieli 100% pewności, że nowa wersja się wdrożyła
+    return "Travel-Bot vFINAL — działa!", 200
 
 @app.get("/healthz")
 def healthz():
@@ -178,7 +180,6 @@ def telegram_webhook():
     msg = update.get("message", {})
     text = msg.get("text")
     if text == "/start":
-        # synchroniczne wywołanie async – jednorazowo
         def _send():
             async def _run():
                 async with httpx.AsyncClient() as client:
@@ -189,13 +190,18 @@ def telegram_webhook():
 
 @app.post("/tasks/rss")
 def handle_rss_task():
+    log.info("Received request on /tasks/rss endpoint.")
     try:
-        result = asyncio.run(process_feeds_async())  # <-- synchronicznie wołamy async
-        code = 200 if result and not result.lower().startswith("missing") else 500
+        # Synchroniczne uruchomienie głównej logiki asynchronicznej
+        result = asyncio.run(process_feeds_async())
+        log.info(f"RSS task finished with result: {result}")
+        code = 200
+        if "Missing" in result or "Critical" in result:
+            code = 500
         return result, code
     except Exception as e:
-        log.exception("Unhandled in /tasks/rss")
-        return f"Server error: {e}", 500
+        log.exception("An unhandled exception occurred in /tasks/rss.")
+        return f"Internal Server Error: {e}", 500
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
