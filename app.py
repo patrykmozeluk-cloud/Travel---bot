@@ -5,6 +5,7 @@ import httpx
 import feedparser
 import orjson
 import time
+import random # <-- NOWOŚĆ: Będziemy losować przebrania
 from flask import Flask, request, jsonify
 from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode
@@ -20,15 +21,25 @@ HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
 
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
 
-# --- LOGI / APP / GCS / URL CANON ---
+# <-- NOWOŚĆ: Twoja szafa z przebraniami (User-Agents) ze starego kodu
+USER_AGENTS = [
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+    'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:89.0) Gecko/20100101 Firefox/89.0',
+    'Mozilla/5.0 (Linux; Android 10; SM-G960F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.101 Mobile Safari/537.36',
+    'Mozilla/5.0 (iPhone; CPU iPhone OS 14_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0 Mobile/15E148 Safari/604.1'
+]
+
+# --- LOGI / APP / GCS ---
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 log = logging.getLogger(__name__)
 app = Flask(__name__)
 storage_client = storage.Client()
 _bucket = storage_client.bucket(BUCKET_NAME)
 _blob = _bucket.blob(SENT_LINKS_FILE)
-DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
 
+# --- URL CANON ---
+DROP_PARAMS = {"utm_source","utm_medium","utm_campaign","utm_term","utm_content","fbclid","gclid","igshid","mc_cid","mc_eid"}
 def canonicalize_url(url: str) -> str:
     try:
         p = urlparse(url.strip())
@@ -95,12 +106,9 @@ def get_rss_sources() -> List[str]:
 
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
-    # NOWOŚĆ: Udajemy normalną przeglądarkę, żeby uniknąć blokad
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-    }
+    # ZMIANA: Losujemy przebranie (User-Agent) z Twojej listy!
+    headers = { 'User-Agent': random.choice(USER_AGENTS) }
     try:
-        # NOWOŚĆ: Dodajemy `headers` do naszego zapytania
         r = await client.get(url, timeout=HTTP_TIMEOUT, follow_redirects=True, headers=headers)
         r.raise_for_status()
         feed = feedparser.parse(r.text)
@@ -189,8 +197,8 @@ async def process_feeds_async() -> str:
 # --- ROUTES & MAIN ---
 @app.get("/")
 def index():
-    # Nowa wersja, żeby wiedzieć, że bot ma "tryb niewidzialności"
-    return "Travel-Bot vSTEALTH — działa!", 200
+    # Nowa wersja, żeby wiedzieć, że to mistrz przebrań
+    return "Travel-Bot vULTIMATE — działa!", 200
 
 @app.get("/healthz")
 def healthz():
