@@ -21,15 +21,22 @@ app = Flask(__name__)
 storage_client = storage.Client()
 
 # --- ENV ---
-TG_TOKEN = os.environ.get('TG_TOKEN')
-TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
-BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
-SENT_LINKS_FILE = os.environ.get('SENT_LINKS_FILE', 'sent_links.json')
-HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
+def env(name: str, default: str | None = None) -> str | None:
+    v = os.environ.get(name, default)
+    return v if v is None else v.strip()
 
-# DEBUG (włącz: DEBUG_FEEDS=1 w Cloud Run)
-DEBUG_FEEDS = os.environ.get("DEBUG_FEEDS", "0") in {"1", "true", "True", "yes", "YES"}
+TG_TOKEN = env("TG_TOKEN")
+TG_CHAT_ID = env("TG_CHAT_ID")
+BUCKET_NAME = env("BUCKET_NAME", "travel-bot-storage-patrykmozeluk-cloud")
+SENT_LINKS_FILE = env("SENT_LINKS_FILE", "sent_links.json")
+HTTP_TIMEOUT = float(env("HTTP_TIMEOUT", "20.0"))
+PUBLIC_BASE_URL = env("PUBLIC_BASE_URL")  # np. https://twoja-usluga-abc-uc.a.run.app
+TELEGRAM_SECRET = env("TELEGRAM_SECRET")  # dowolny ciąg; chroni webhook nagłówkiem
+ENABLE_WEBHOOK = env("ENABLE_WEBHOOK", "1") in {"1", "true", "True", "yes", "YES"}
+DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1", "true", "True", "yes", "YES"}
+DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1", "true", "True", "yes", "YES"}
+MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
+
 def dbg(msg: str):
     if DEBUG_FEEDS:
         log.info(f"DEBUG {msg}")
@@ -69,7 +76,8 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
                 for link in state_data["sent_links"]
             }
         return state_data, generation
-    except Exception:
+    except Exception as e:
+        log.warning(f"load_state fallback: {e}")
         return _default_state(), None
 
 def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 10):
@@ -82,7 +90,6 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
                 _blob.upload_from_string(payload, if_generation_match=expected_generation, content_type="application/json")
             return
         except Exception as e:
-            # wyścig zapisu -> odśwież generation i powtórz
             if "PreconditionFailed" in str(e) or "412" in str(e):
                 time.sleep(0.5)
                 _, expected_generation = load_state()
@@ -146,6 +153,54 @@ def get_rss_sources() -> List[str]:
         log.error("CRITICAL: rss_sources.txt not found.")
         return []
 
+# --- TELEGRAM helpers ---
+def telegram_api_url(method: str) -> str:
+    token = env("TG_TOKEN")  # świeży odczyt na wszelki wypadek
+    if not token:
+        return ""
+    return f"https://api.telegram.org/bot{token}/{method}"
+
+async def telegram_call(method: str, payload: Dict[str, Any] | None = None) -> tuple[bool, Dict[str, Any] | str]:
+    url = telegram_api_url(method)
+    if not url:
+        log.error("TG_TOKEN is not set.")
+        return False, "missing_token"
+    async with make_async_client() as client:
+        try:
+            if payload is None:
+                r = await client.get(url, timeout=HTTP_TIMEOUT)
+            else:
+                r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+            status = r.status_code
+            text = r.text
+            ok = False
+            body: Dict[str, Any] | str
+            try:
+                body = r.json()
+                ok = bool(body.get("ok"))
+            except Exception:
+                body = text
+            log.info(f"TG {method} -> {status} | ok={ok} | body_sample={str(body)[:300]}")
+            r.raise_for_status()
+            return True, body
+        except Exception as e:
+            log.error(f"TG {method} error: {e}")
+            return False, str(e)
+
+async def send_telegram_message_async(title: str, link: str, chat_id: str | None = None) -> bool:
+    chat = chat_id or env("TG_CHAT_ID")
+    if not chat:
+        log.error("TG_CHAT_ID is not set.")
+        return False
+    message = f"<b>{title}</b>\n\n{link}"
+    ok, _ = await telegram_call("sendMessage", {
+        "chat_id": chat,
+        "text": message,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True
+    })
+    return ok
+
 # --- FETCH FEED (z pełnym śladem) ---
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
@@ -166,9 +221,8 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             last_status = r.status_code
             dbg(f"GET {url} -> {r.status_code}")
             if r.status_code == 200:
-                feed = feedparser.parse(r.content)  # PARSUJ bytes
+                feed = feedparser.parse(r.content)
                 dbg(f"Feed parsed: entries={len(feed.entries)}")
-
                 for i, entry in enumerate(feed.entries):
                     t = entry.get("title")
                     l = entry.get("link")
@@ -177,7 +231,6 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
                         continue
                     dbg(f"[{i}] FETCHED title='{t[:90]}' link={l}")
                     posts.append((t, l))
-
                 log.info(f"Fetched {len(posts)} posts from {url}")
                 return posts
 
@@ -197,7 +250,7 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             log.error(f"Error fetching RSS {url}: {e}")
             await asyncio.sleep(1.0 * attempt)
 
-    # Fallback: spróbuj znaleźć alternatywny link RSS na homepage
+    # Fallback: spróbuj alternatywny link RSS na homepage
     try:
         html = await client.get(base, headers=headers)
         if html.status_code == 200:
@@ -230,22 +283,22 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         soup = BeautifulSoup(r.text, 'html.parser')
 
         if "travel-dealz.com" in url:
-            for article in soup.select('article.article-item'):
-                link_tag = article.select_one('h2.article-title a')
+            for article in soup.select('article.article-item, article.article'):
+                link_tag = article.select_one('h2.article-title a, h2 a')
                 if link_tag and (href := link_tag.get('href')):
                     posts.append((link_tag.get_text(strip=True), href))
 
         elif "secretflying.com" in url:
-            for article in soup.select('article.post-item'):
-                link_tag = article.select_one('.post-title a')
+            for article in soup.select('article.post-item, article'):
+                link_tag = article.select_one('.post-title a, h2 a')
                 if link_tag and (href := link_tag.get('href')):
                     posts.append((link_tag.get_text(strip=True), href))
 
         elif "wakacyjnipiraci.pl" in url:
-            for article in soup.select('article.post-list__item'):
-                link_tag = article.select_one('a.post-list__link')
+            for article in soup.select('article.post-list__item, article'):
+                link_tag = article.select_one('a.post-list__link, h2 a')
                 if link_tag and (href := link_tag.get('href')):
-                    title_tag = article.select_one('h2.post-list__title')
+                    title_tag = article.select_one('h2.post-list__title, h2')
                     if title_tag:
                         posts.append((title_tag.get_text(strip=True), href))
 
@@ -260,26 +313,10 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         log.error(f"Error scraping webpage {url}: {e}")
         return []
 
-# --- TELEGRAM (zwraca True/False) ---
-async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str) -> bool:
-    if not TELEGRAM_API_URL:
-        log.error("TG_TOKEN is not set.")
-        return False
-    message = f"<b>{title}</b>\n\n{link}"
-    payload = {'chat_id': TG_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
-    try:
-        r = await client.post(TELEGRAM_API_URL, json=payload, timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        log.info(f"Message sent: {title[:80]}…")
-        return True
-    except Exception as e:
-        log.error(f"Telegram error for link {link}: {e}")
-        return False
-
 # --- MAIN FLOW (zapis dopiero po UDANEJ wysyłce) ---
 async def process_feeds_async() -> str:
     log.info("Starting hybrid processing (RSS + Scraping).")
-    if not TG_TOKEN or not TG_CHAT_ID:
+    if not env("TG_TOKEN") or not env("TG_CHAT_ID"):
         return "Missing TG_TOKEN/TG_CHAT_ID."
 
     rss_sources = get_rss_sources()
@@ -296,9 +333,10 @@ async def process_feeds_async() -> str:
         results = await asyncio.gather(*(rss_tasks + scrape_tasks), return_exceptions=False)
 
     all_posts = [post for post_list in results for post in post_list]
+    if MAX_POSTS_PER_RUN > 0 and len(all_posts) > MAX_POSTS_PER_RUN:
+        all_posts = all_posts[:MAX_POSTS_PER_RUN]
     dbg(f"ALL_POSTS total={len(all_posts)}")
 
-    # Kandydaci (jeszcze bez zapisu do sent_links)
     candidates: List[Tuple[str, str]] = []
     now_utc = datetime.now(timezone.utc)
 
@@ -307,7 +345,7 @@ async def process_feeds_async() -> str:
 
     for idx, (title, link) in enumerate(all_posts):
         canonical = canonicalize_url(link)
-        if canonical not in sent_links_dict:
+        if DISABLE_DEDUP or canonical not in sent_links_dict:
             candidates.append((title, link))
             dbg(f"NEW [{idx}] {canonical}  title='{title[:90]}'")
         else:
@@ -321,16 +359,14 @@ async def process_feeds_async() -> str:
         + (f", dup_samples={dup_samples}" if DEBUG_FEEDS and dup_samples else "")
     )
 
-    # Wysyłka + dopiero potem zapis do sent_links dla UDANYCH
     sent_count = 0
     if candidates:
         log.info(f"Found {len(candidates)} new posts. Sending.")
         async with make_async_client() as client:
             results = await asyncio.gather(*[
-                send_telegram_message_async(client, t, l) for t, l in candidates
+                send_telegram_message_async(t, l) for t, l in candidates
             ])
 
-        # zapisz TYLKO te, które poszły
         for (t, l), ok in zip(candidates, results):
             if ok:
                 sent_links_dict[canonicalize_url(l)] = now_utc.isoformat()
@@ -344,10 +380,16 @@ async def process_feeds_async() -> str:
 
     # cleanup >30 dni
     thirty_days_ago = now_utc - timedelta(days=30)
-    cleaned_sent_links = {
-        link: ts for link, ts in sent_links_dict.items()
-        if datetime.fromisoformat(ts) > thirty_days_ago
-    }
+    cleaned_sent_links = {}
+    for link, ts in sent_links_dict.items():
+        try:
+            when = datetime.fromisoformat(ts)
+        except Exception:
+            # jeśli stara forma bez strefy – przyjmij UTC bezpiecznie
+            when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        if when > thirty_days_ago:
+            cleaned_sent_links[link] = ts
+
     log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
     state["sent_links"] = cleaned_sent_links
 
@@ -370,17 +412,38 @@ def index():
 def healthz():
     return jsonify({"status": "ok"}), 200
 
+def _is_start_command(update: Dict[str, Any]) -> bool:
+    msg = update.get("message", {})
+    text = (msg.get("text") or "").strip()
+    if not text:
+        return False
+    if text.lower().startswith("/start"):
+        return True
+    # sprawdź encje bot_command (obsłuży /start@NazwaBota)
+    for ent in msg.get("entities", []):
+        if ent.get("type") == "bot_command" and (text[ent["offset"]: ent["offset"]+ent["length"]]).lower().startswith("/start"):
+            return True
+    return False
+
 @app.post("/tg/webhook")
 def telegram_webhook():
+    # prosty HMAC-lite: Telegram może wysłać nagłówek z sekretem, jeśli ustawisz go przy setWebhook
+    if TELEGRAM_SECRET:
+        secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if secret_header != TELEGRAM_SECRET:
+            log.warning("Webhook secret mismatch.")
+            return "Forbidden", 403
+
     update = request.get_json(silent=True) or {}
-    msg = update.get("message", {})
-    text = msg.get("text")
-    if text == "/start":
+    if _is_start_command(update):
+        chat = update.get("message", {}).get("chat", {})
+        chat_id = str(chat.get("id")) if chat else env("TG_CHAT_ID")
         async def _run():
-            async with make_async_client() as client:
-                await send_telegram_message_async(
-                    client, title="Cześć!", link="Bot działa — poluję na okazje i sam po sobie sprzątam."
-                )
+            await send_telegram_message_async(
+                title="Cześć! 👋",
+                link="Bot działa — poluję na okazje i sam po sobie sprzątam.",
+                chat_id=chat_id,
+            )
         asyncio.run(_run())
     return "OK", 200
 
@@ -396,7 +459,7 @@ def handle_rss_task():
         log.exception("Unhandled error in /tasks/rss")
         return f"Server error: {e}", 500
 
-# DODATKOWE, pomocne podglądy (opcjonalnie)
+# --- DIAGNOSTYKA / POMOC ---
 @app.get("/debug/state")
 def debug_state():
     state, _ = load_state()
@@ -411,14 +474,46 @@ def debug_state():
 def debug_check():
     return jsonify({
         "env": {
-            "TG_CHAT_ID": os.environ.get("TG_CHAT_ID"),
-            "BUCKET_NAME": os.environ.get("BUCKET_NAME"),
-            "SENT_LINKS_FILE": os.environ.get("SENT_LINKS_FILE"),
-            "HTTP_TIMEOUT": os.environ.get("HTTP_TIMEOUT"),
-            "DEBUG_FEEDS": os.environ.get("DEBUG_FEEDS"),
+            "TG_CHAT_ID": env("TG_CHAT_ID"),
+            "BUCKET_NAME": env("BUCKET_NAME"),
+            "SENT_LINKS_FILE": env("SENT_LINKS_FILE"),
+            "HTTP_TIMEOUT": env("HTTP_TIMEOUT"),
+            "DEBUG_FEEDS": env("DEBUG_FEEDS"),
+            "DISABLE_DEDUP": env("DISABLE_DEDUP"),
+            "PUBLIC_BASE_URL": env("PUBLIC_BASE_URL"),
+            "ENABLE_WEBHOOK": env("ENABLE_WEBHOOK"),
         }
     }), 200
 
+@app.get("/debug/telegram/getMe")
+def debug_tg_getme():
+    ok, body = asyncio.run(telegram_call("getMe"))
+    return (jsonify(body), 200) if ok else (str(body), 500)
+
+@app.post("/debug/telegram/ping")
+def debug_tg_ping():
+    try:
+        title = request.json.get("title", "Self-test from Cloud Run ✅")
+        link = request.json.get("link", "Ping.")
+    except Exception:
+        title, link = "Self-test from Cloud Run ✅", "Ping."
+    ok = asyncio.run(send_telegram_message_async(title, link))
+    return (jsonify({"ok": True}), 200) if ok else ("TG send failed", 500)
+
+@app.post("/tg/set_webhook")
+def set_webhook():
+    if not ENABLE_WEBHOOK:
+        return "webhook disabled", 200
+    base = PUBLIC_BASE_URL
+    if not base:
+        return "Set PUBLIC_BASE_URL first.", 400
+    url = f"{base.rstrip('/')}/tg/webhook"
+    params = {"url": url}
+    if TELEGRAM_SECRET:
+        params["secret_token"] = TELEGRAM_SECRET
+    ok, body = asyncio.run(telegram_call("setWebhook", params))
+    return (jsonify(body), 200) if ok else (str(body), 500)
+
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
+    port = int(env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
