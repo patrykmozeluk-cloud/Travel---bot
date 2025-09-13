@@ -12,7 +12,15 @@ from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
 from bs4 import BeautifulSoup
 
-# --- KONFIG ---
+# --- LOGGING ---
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+log = logging.getLogger(__name__)
+
+# --- APP / GCS ---
+app = Flask(__name__)
+storage_client = storage.Client()
+
+# --- ENV ---
 TG_TOKEN = os.environ.get('TG_TOKEN')
 TG_CHAT_ID = os.environ.get('TG_CHAT_ID')
 BUCKET_NAME = os.environ.get('BUCKET_NAME', 'travel-bot-storage-patrykmozeluk-cloud')
@@ -20,11 +28,13 @@ SENT_LINKS_FILE = os.environ.get('SENT_LINKS_FILE', 'sent_links.json')
 HTTP_TIMEOUT = float(os.environ.get('HTTP_TIMEOUT', "20.0"))
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage" if TG_TOKEN else None
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
-log = logging.getLogger(__name__)
+# DEBUG (włącz: DEBUG_FEEDS=1 w Cloud Run)
+DEBUG_FEEDS = os.environ.get("DEBUG_FEEDS", "0") in {"1", "true", "True", "yes", "YES"}
+def dbg(msg: str):
+    if DEBUG_FEEDS:
+        log.info(f"DEBUG {msg}")
 
-app = Flask(__name__)
-storage_client = storage.Client()
+# --- GCS SENT LINKS STATE ---
 _bucket = storage_client.bucket(BUCKET_NAME)
 _blob = _bucket.blob(SENT_LINKS_FILE)
 
@@ -52,6 +62,7 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         data = _blob.download_as_bytes()
         generation = _blob.generation
         state_data = orjson.loads(data)
+        # migracja starego formatu (lista -> dict)
         if isinstance(state_data.get("sent_links"), list):
             state_data["sent_links"] = {
                 link: datetime.now(timezone.utc).isoformat()
@@ -61,7 +72,7 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
     except Exception:
         return _default_state(), None
 
-def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 5):
+def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, retries: int = 10):
     payload = orjson.dumps(state)
     for attempt in range(retries):
         try:
@@ -71,6 +82,7 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
                 _blob.upload_from_string(payload, if_generation_match=expected_generation, content_type="application/json")
             return
         except Exception as e:
+            # wyścig zapisu -> odśwież generation i powtórz
             if "PreconditionFailed" in str(e) or "412" in str(e):
                 time.sleep(0.5)
                 _, expected_generation = load_state()
@@ -78,8 +90,7 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
             raise
     raise RuntimeError("Atomic save failed.")
 
-# --- ANTI-BOT / NAGŁÓWKI / KLIENT HTTP ---
-
+# --- HTTP KLIENT (anti-bot fingerprint) ---
 BROWSER_HEADERS = {
     "User-Agent": ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                    "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -114,8 +125,7 @@ def make_async_client() -> httpx.AsyncClient:
         limits=limits,
     )
 
-# --- ŹRÓDŁA ---
-
+# --- SOURCES ---
 def get_web_sources() -> List[str]:
     try:
         with open('web_sources.txt', 'r', encoding='utf-8') as f:
@@ -136,32 +146,38 @@ def get_rss_sources() -> List[str]:
         log.error("CRITICAL: rss_sources.txt not found.")
         return []
 
-# --- POBIERANIE RSS Z OBEJŚCIAMI ---
-
+# --- FETCH FEED (z pełnym śladem) ---
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
     headers = build_headers(url)
     base = domain_root(url)
 
-    # Pre-warm: złap cookies z homepage (często kluczowe przy WAF)
+    # pre-warm: cookies z homepage (często potrzebne przy WAF)
     try:
         warm = await client.get(base, headers=headers)
-        log.info(f"warmup {base} -> {warm.status_code}")
+        dbg(f"warmup {base} -> {warm.status_code}")
     except Exception as e:
-        log.warning(f"warmup error {base}: {e}")
+        dbg(f"warmup error {base}: {e}")
 
     last_status = None
-    for attempt in range(1, 4):  # do 3 prób
+    for attempt in range(1, 4):  # 3 próby
         try:
             r = await client.get(url, headers=headers)
             last_status = r.status_code
+            dbg(f"GET {url} -> {r.status_code}")
             if r.status_code == 200:
-                # PARSUJ bytes, nie .text
-                feed = feedparser.parse(r.content)
-                for entry in feed.entries:
-                    t, l = entry.get("title"), entry.get("link")
-                    if t and l:
-                        posts.append((t, l))
+                feed = feedparser.parse(r.content)  # PARSUJ bytes
+                dbg(f"Feed parsed: entries={len(feed.entries)}")
+
+                for i, entry in enumerate(feed.entries):
+                    t = entry.get("title")
+                    l = entry.get("link")
+                    if not t or not l:
+                        dbg(f"[{i}] SKIP (brak tytułu/linku) keys={list(entry.keys())}")
+                        continue
+                    dbg(f"[{i}] FETCHED title='{t[:90]}' link={l}")
+                    posts.append((t, l))
+
                 log.info(f"Fetched {len(posts)} posts from {url}")
                 return posts
 
@@ -174,14 +190,14 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             r.raise_for_status()
 
         except httpx.HTTPStatusError as he:
-            try_code = he.response.status_code if he.response else None
-            log.error(f"HTTP {try_code} for {url}: {he}")
+            code = he.response.status_code if he.response else None
+            log.error(f"HTTP {code} for {url}: {he}")
             break
         except Exception as e:
             log.error(f"Error fetching RSS {url}: {e}")
             await asyncio.sleep(1.0 * attempt)
 
-    # Fallback: poszukaj alternatywnego linku RSS na homepage
+    # Fallback: spróbuj znaleźć alternatywny link RSS na homepage
     try:
         html = await client.get(base, headers=headers)
         if html.status_code == 200:
@@ -199,13 +215,11 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
     log.error(f"Feed blocked or unavailable: {url} (last_status={last_status})")
     return []
 
-# --- SCRAPER Z OBEJŚCIAMI ---
-
+# --- SCRAPER (te same nagłówki/klient) ---
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
     headers = build_headers(url)
     try:
-        # pre-warm (cookies)
         try:
             await client.get(domain_root(url), headers=headers)
         except Exception:
@@ -215,21 +229,18 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
-        # travel-dealz.com
         if "travel-dealz.com" in url:
             for article in soup.select('article.article-item'):
                 link_tag = article.select_one('h2.article-title a')
                 if link_tag and (href := link_tag.get('href')):
                     posts.append((link_tag.get_text(strip=True), href))
 
-        # secretflying.com
         elif "secretflying.com" in url:
             for article in soup.select('article.post-item'):
                 link_tag = article.select_one('.post-title a')
                 if link_tag and (href := link_tag.get('href')):
                     posts.append((link_tag.get_text(strip=True), href))
 
-        # wakacyjnipiraci.pl
         elif "wakacyjnipiraci.pl" in url:
             for article in soup.select('article.post-list__item'):
                 link_tag = article.select_one('a.post-list__link')
@@ -249,8 +260,7 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         log.error(f"Error scraping webpage {url}: {e}")
         return []
 
-# --- TELEGRAM / GŁÓWNA LOGIKA ---
-
+# --- TELEGRAM ---
 async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str):
     if not TELEGRAM_API_URL:
         log.error("TG_TOKEN is not set.")
@@ -264,6 +274,7 @@ async def send_telegram_message_async(client: httpx.AsyncClient, title: str, lin
     except Exception as e:
         log.error(f"Telegram error for link {link}: {e}")
 
+# --- MAIN FLOW ---
 async def process_feeds_async() -> str:
     log.info("Starting hybrid processing (RSS + Scraping).")
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -275,31 +286,54 @@ async def process_feeds_async() -> str:
         return "No RSS or Web sources found."
 
     state, generation = load_state()
-    sent_links_dict = state.get("sent_links", {})
+    sent_links_dict: Dict[str, str] = state.get("sent_links", {})
 
     async with make_async_client() as client:
         rss_tasks = [fetch_feed(client, url) for url in rss_sources]
         scrape_tasks = [scrape_webpage(client, url) for url in web_sources]
-        results = await asyncio.gather(*(rss_tasks + scrape_tasks))
+        results = await asyncio.gather(*(rss_tasks + scrape_tasks), return_exceptions=False)
 
-        all_posts = [post for post_list in results for post in post_list]
+    all_posts = [post for post_list in results for post in post_list]
+    dbg(f"ALL_POSTS total={len(all_posts)}")
 
-        new_posts: List[Tuple[str, str]] = []
-        now_utc = datetime.now(timezone.utc)
+    new_posts: List[Tuple[str, str]] = []
+    now_utc = datetime.now(timezone.utc)
 
-        for title, link in all_posts:
-            canonical = canonicalize_url(link)
-            if canonical not in sent_links_dict:
-                new_posts.append((title, link))
-                sent_links_dict[canonical] = now_utc.isoformat()
+    dup_count = 0
+    dup_samples: List[str] = []
 
-        if new_posts:
-            log.info(f"Found {len(new_posts)} new posts. Sending.")
+    for idx, (title, link) in enumerate(all_posts):
+        canonical = canonicalize_url(link)
+        if canonical not in sent_links_dict:
+            new_posts.append((title, link))
+            sent_links_dict[canonical] = now_utc.isoformat()
+            dbg(f"NEW [{idx}] {canonical}  title='{title[:90]}'")
+        else:
+            dup_count += 1
+            if len(dup_samples) < 5:
+                dup_samples.append(canonical)
+            dbg(f"DUP  [{idx}] {canonical}")
+
+    log.info(
+        f"Summary: seen={len(all_posts)}, new={len(new_posts)}, duplicates={dup_count}"
+        + (f", dup_samples={dup_samples}" if DEBUG_FEEDS and dup_samples else "")
+    )
+
+    sent_count = 0
+    if new_posts:
+        log.info(f"Found {len(new_posts)} new posts. Sending.")
+        async with make_async_client() as client:
             await asyncio.gather(*[
                 send_telegram_message_async(client, t, l) for t, l in new_posts
             ])
+        sent_count = len(new_posts)
+        if DEBUG_FEEDS:
+            sample_titles = [t[:90] for t, _ in new_posts[:5]]
+            log.info(f"Sent sample titles: {sample_titles}")
+    else:
+        log.info("Found 0 new posts. Nothing to send.")
 
-    # cleanup pamięci 30 dni
+    # cleanup >30 dni
     thirty_days_ago = now_utc - timedelta(days=30)
     cleaned_sent_links = {
         link: ts for link, ts in sent_links_dict.items()
@@ -314,10 +348,11 @@ async def process_feeds_async() -> str:
         log.critical(f"State save failure: {e}")
         return f"Critical: {e}"
 
-    return f"Done. Sent {len(new_posts)} posts." if new_posts else "Done. No new posts."
+    result_msg = f"Done. Sent {sent_count} posts."
+    log.info(result_msg)
+    return result_msg
 
 # --- ROUTES ---
-
 @app.get("/")
 def index():
     return "Travel-Bot vHYBRID — działa!", 200
@@ -351,6 +386,29 @@ def handle_rss_task():
     except Exception as e:
         log.exception("Unhandled error in /tasks/rss")
         return f"Server error: {e}", 500
+
+# DODATKOWE, pomocne podglądy (opcjonalnie)
+@app.get("/debug/state")
+def debug_state():
+    state, _ = load_state()
+    sent = state.get("sent_links", {})
+    last = sorted(sent.items(), key=lambda kv: kv[1], reverse=True)[:10]
+    return jsonify({
+        "count": len(sent),
+        "sample_last": [{"url": k, "ts": v} for k, v in last]
+    }), 200
+
+@app.get("/debug/check")
+def debug_check():
+    return jsonify({
+        "env": {
+            "TG_CHAT_ID": os.environ.get("TG_CHAT_ID"),
+            "BUCKET_NAME": os.environ.get("BUCKET_NAME"),
+            "SENT_LINKS_FILE": os.environ.get("SENT_LINKS_FILE"),
+            "HTTP_TIMEOUT": os.environ.get("HTTP_TIMEOUT"),
+            "DEBUG_FEEDS": os.environ.get("DEBUG_FEEDS"),
+        }
+    }), 200
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
