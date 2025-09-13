@@ -260,21 +260,23 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
         log.error(f"Error scraping webpage {url}: {e}")
         return []
 
-# --- TELEGRAM ---
-async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str):
+# --- TELEGRAM (zwraca True/False) ---
+async def send_telegram_message_async(client: httpx.AsyncClient, title: str, link: str) -> bool:
     if not TELEGRAM_API_URL:
         log.error("TG_TOKEN is not set.")
-        return
+        return False
     message = f"<b>{title}</b>\n\n{link}"
     payload = {'chat_id': TG_CHAT_ID, 'text': message, 'parse_mode': 'HTML'}
     try:
         r = await client.post(TELEGRAM_API_URL, json=payload, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         log.info(f"Message sent: {title[:80]}…")
+        return True
     except Exception as e:
         log.error(f"Telegram error for link {link}: {e}")
+        return False
 
-# --- MAIN FLOW ---
+# --- MAIN FLOW (zapis dopiero po UDANEJ wysyłce) ---
 async def process_feeds_async() -> str:
     log.info("Starting hybrid processing (RSS + Scraping).")
     if not TG_TOKEN or not TG_CHAT_ID:
@@ -296,7 +298,8 @@ async def process_feeds_async() -> str:
     all_posts = [post for post_list in results for post in post_list]
     dbg(f"ALL_POSTS total={len(all_posts)}")
 
-    new_posts: List[Tuple[str, str]] = []
+    # Kandydaci (jeszcze bez zapisu do sent_links)
+    candidates: List[Tuple[str, str]] = []
     now_utc = datetime.now(timezone.utc)
 
     dup_count = 0
@@ -305,8 +308,7 @@ async def process_feeds_async() -> str:
     for idx, (title, link) in enumerate(all_posts):
         canonical = canonicalize_url(link)
         if canonical not in sent_links_dict:
-            new_posts.append((title, link))
-            sent_links_dict[canonical] = now_utc.isoformat()
+            candidates.append((title, link))
             dbg(f"NEW [{idx}] {canonical}  title='{title[:90]}'")
         else:
             dup_count += 1
@@ -315,20 +317,27 @@ async def process_feeds_async() -> str:
             dbg(f"DUP  [{idx}] {canonical}")
 
     log.info(
-        f"Summary: seen={len(all_posts)}, new={len(new_posts)}, duplicates={dup_count}"
+        f"Summary(before send): seen={len(all_posts)}, new_candidates={len(candidates)}, duplicates={dup_count}"
         + (f", dup_samples={dup_samples}" if DEBUG_FEEDS and dup_samples else "")
     )
 
+    # Wysyłka + dopiero potem zapis do sent_links dla UDANYCH
     sent_count = 0
-    if new_posts:
-        log.info(f"Found {len(new_posts)} new posts. Sending.")
+    if candidates:
+        log.info(f"Found {len(candidates)} new posts. Sending.")
         async with make_async_client() as client:
-            await asyncio.gather(*[
-                send_telegram_message_async(client, t, l) for t, l in new_posts
+            results = await asyncio.gather(*[
+                send_telegram_message_async(client, t, l) for t, l in candidates
             ])
-        sent_count = len(new_posts)
-        if DEBUG_FEEDS:
-            sample_titles = [t[:90] for t, _ in new_posts[:5]]
+
+        # zapisz TYLKO te, które poszły
+        for (t, l), ok in zip(candidates, results):
+            if ok:
+                sent_links_dict[canonicalize_url(l)] = now_utc.isoformat()
+                sent_count += 1
+
+        if DEBUG_FEEDS and sent_count:
+            sample_titles = [t[:90] for (t, _), ok in zip(candidates, results) if ok][:5]
             log.info(f"Sent sample titles: {sample_titles}")
     else:
         log.info("Found 0 new posts. Nothing to send.")
