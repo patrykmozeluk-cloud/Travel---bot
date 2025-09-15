@@ -1,17 +1,29 @@
-name: Check RSS feeds every 15 minutes
+name: Travel Bot · every 15m
 
 on:
   schedule:
-    # Uruchamia się co 15 minut
-    - cron: '*/15 * * * *'
+    - cron: "*/15 * * * *"   # co 15 minut
   workflow_dispatch:
-    # Możesz też ręcznie uruchomić w panelu Actions
+
+# Żeby kolejne wywołania się nie nakładały
+concurrency:
+  group: travel-bot
+  cancel-in-progress: false
 
 jobs:
   check-feeds:
     runs-on: ubuntu-latest
+    timeout-minutes: 3
     steps:
       - name: Call Cloud Run bot
+        env:
+          RUN_URL: ${{ secrets.RUN_URL }}          # np. https://travel-bot-xxxx.a.run.app
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}  # ten sam co TELEGRAM_SECRET na serwerze
         run: |
-          curl -s -X POST "${{ secrets.RUN_URL }}/tasks/rss" \
-            -H "Content-Type: application/json"
+          set -euo pipefail
+          curl -sS -X POST "$RUN_URL/tasks/rss" \
+            -H "Content-Type: application/json" \
+            -H "X-Task-Secret: $TASK_SECRET" \
+            --retry 5 --retry-all-errors \
+            --connect-timeout 10 --max-time 55 \
+            --fail --show-error
