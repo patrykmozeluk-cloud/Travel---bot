@@ -2,10 +2,9 @@ name: Travel Bot · every 15m
 
 on:
   schedule:
-    - cron: "*/15 * * * *"   # co 15 minut
+    - cron: "*/15 * * * *"
   workflow_dispatch:
 
-# Żeby kolejne wywołania się nie nakładały
 concurrency:
   group: travel-bot
   cancel-in-progress: false
@@ -15,10 +14,10 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 3
     steps:
-      - name: Call Cloud Run bot
+      - name: Call bot endpoint
         env:
-          RUN_URL: ${{ secrets.RUN_URL }}          # np. https://travel-bot-xxxx.a.run.app
-          TASK_SECRET: ${{ secrets.TASK_SECRET }}  # ten sam co TELEGRAM_SECRET na serwerze
+          RUN_URL: ${{ secrets.RUN_URL }}          # np. https://travel-bot-...run.app
+          TASK_SECRET: ${{ secrets.TASK_SECRET }}  # = TELEGRAM_SECRET na serwerze (jeśli używasz)
         run: |
           set -euo pipefail
           curl -sS -X POST "$RUN_URL/tasks/rss" \
