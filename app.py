@@ -239,9 +239,13 @@ async def telegram_call(method: str, payload: Dict[str, Any] | None = None) -> t
                 ok = bool(body.get("ok"))
             except Exception:
                 body = text
-            log.info(f"TG {method} -> {status} | ok={ok} | body_sample={str(body)[:300]}")
+
+            # <-- KLUCZOWA ZMIANA: zwracaj ok z TG, a nie „HTTP poszło”
+            if not ok:
+                log.error(f"TG API not ok: method={method} status={status} body={text[:500]}")
+
             r.raise_for_status()
-            return True, body
+            return ok, body
         except Exception as e:
             log.error(f"TG {method} error: {e}")
             return False, str(e)
@@ -307,7 +311,13 @@ async def send_telegram_message_async(title: str, link: str, chat_id: str | None
 
         async with make_async_client() as client:
             r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+            body_text = r.text
             r.raise_for_status()
+            # jeżeli TG zwróci 200, ale ok=false — nie uznajemy tego za sukces
+            if '"ok":false' in body_text.replace(" ", "").lower():
+                log.error(f"Telegram returned ok=false: body={body_text[:500]}")
+                return False
+
             log.info(f"Message sent: {title[:80]}… (with_photo={bool(img)})")
             return True
 
@@ -681,3 +691,4 @@ def set_webhook():
 if __name__ == "__main__":
     port = int(env("PORT", "8080"))
     app.run(host="0.0.0.0", port=port, debug=True)
+    
