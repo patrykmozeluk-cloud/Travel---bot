@@ -38,7 +38,7 @@ DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1", "true", "True", "yes", "YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1", "true", "True", "yes", "YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
 
-# Proxy per-domain
+# Proxy per-domain (opcjonalne — jeśli nie ustawisz ENV, nie będzie używane)
 PROXY_ALL = env("HTTP_PROXY") or env("HTTPS_PROXY")  # np. https://user:pass@host:port
 PROXY_DOMAINS = {
     d.strip().lower() for d in (env("PROXY_DOMAINS") or "").split(",") if d and d.strip()
@@ -246,48 +246,74 @@ async def telegram_call(method: str, payload: Dict[str, Any] | None = None) -> t
             log.error(f"TG {method} error: {e}")
             return False, str(e)
 
-# --- IMG helper ---
+# --- IMG helper (łączymy światy: og/twitter image + pierwszy <img>) ---
 async def find_og_image(client: httpx.AsyncClient, url: str) -> str | None:
     try:
         r = await client.get(url, headers=build_headers(url))
         r.raise_for_status()
         s = BeautifulSoup(r.text, "html.parser")
-        for sel in ('meta[property="og:image"]','meta[name="twitter:image"]'):
+        # 1) meta tags
+        for sel in (
+            'meta[property="og:image:secure_url"]',
+            'meta[property="og:image"]',
+            'meta[name="twitter:image"]',
+        ):
             tag = s.select_one(sel)
             if tag and tag.get("content"):
-                return tag["content"].strip()
+                img = tag["content"].strip()
+                if img.startswith("http"):
+                    return img
+        # 2) pierwszy obrazek w treści artykułu
+        main = s.select_one("article") or s
+        img = main.select_one("img")
+        if img and img.get("src"):
+            src = img["src"].strip()
+            if src.startswith("http"):
+                return src
     except Exception:
         pass
     return None
 
-# --- SEND TG (foto jeśli jest, inaczej tekst; bezpieczny tytuł) ---
+# --- SEND TG (najpierw nasze foto; inaczej pozwól TG zrobić preview) ---
 async def send_telegram_message_async(title: str, link: str, chat_id: str | None = None) -> bool:
     chat = chat_id or env("TG_CHAT_ID")
-    if not chat:
-        log.error("TG_CHAT_ID is not set.")
+    token = env("TG_TOKEN")
+    if not token or not chat:
+        log.error("Brak TG_TOKEN/TG_CHAT_ID.")
         return False
+
     import html
     safe_title = html.escape(title, quote=False)
     caption = f"<b>{safe_title}</b>\n\n{link}"
 
-    # własny klient do pobrania ewentualnego obrazka (z rotacją UA/cookies)
-    async with make_async_client() as client:
-        try:
+    try:
+        # spróbujmy znaleźć miniaturę sami
+        async with make_async_client() as client:
             img = await find_og_image(client, link)
-            if img:
-                ok, _ = await telegram_call("sendPhoto", {
-                    "chat_id": chat, "photo": img, "caption": caption, "parse_mode": "HTML"
-                })
-            else:
-                ok, _ = await telegram_call("sendMessage", {
-                    "chat_id": chat, "text": caption, "parse_mode": "HTML", "disable_web_page_preview": True
-                })
-            if ok:
-                log.info(f"Message sent: {title[:80]}… (with_photo={bool(img)})")
-            return ok
-        except Exception as e:
-            log.error(f"Telegram error for link {link}: {e}")
-            return False
+
+        if img:
+            # pewna miniatura (nasza)
+            url = f"https://api.telegram.org/bot{token}/sendPhoto"
+            payload = {"chat_id": chat, "photo": img, "caption": caption, "parse_mode": "HTML"}
+        else:
+            # brak obrazka → oddaj preview Telegramowi
+            url = f"https://api.telegram.org/bot{token}/sendMessage"
+            payload = {
+                "chat_id": chat,
+                "text": caption,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": False,  # <- pozwól TG na auto-preview
+            }
+
+        async with make_async_client() as client:
+            r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            log.info(f"Message sent: {title[:80]}… (with_photo={bool(img)})")
+            return True
+
+    except Exception as e:
+        log.error(f"Telegram send error for {link}: {e}")
+        return False
 
 # --- FETCH FEED (z pełnym śladem) ---
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
@@ -496,7 +522,6 @@ async def process_feeds_async() -> str:
     sent_count = 0
     if candidates:
         log.info(f"Found {len(candidates)} new posts. Sending.")
-        # wysyłamy z obrazkiem/escape title (wewnątrz ma własny klient dla og:image)
         results = await asyncio.gather(*[
             send_telegram_message_async(t, l) for t, l in candidates
         ])
