@@ -5,4 +5,3 @@ feedparser
 orjson
 beautifulsoup4
 google-cloud-storage
-
