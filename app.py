@@ -6,6 +6,7 @@ import feedparser
 import orjson
 import time
 import random
+import html
 from flask import Flask, request, jsonify
 from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
@@ -37,19 +38,6 @@ ENABLE_WEBHOOK = env("ENABLE_WEBHOOK", "1") in {"1", "true", "True", "yes", "YES
 DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1", "true", "True", "yes", "YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1", "true", "True", "yes", "YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
-
-# Proxy per-domain (opcjonalne — jeśli nie ustawisz ENV, nie będzie używane)
-PROXY_ALL = env("HTTP_PROXY") or env("HTTPS_PROXY")  # np. https://user:pass@host:port
-PROXY_DOMAINS = {
-    d.strip().lower() for d in (env("PROXY_DOMAINS") or "").split(",") if d and d.strip()
-}
-
-def needs_proxy(url: str) -> bool:
-    try:
-        host = urlparse(url).netloc.lower()
-        return any(host.endswith(d) for d in PROXY_DOMAINS)
-    except Exception:
-        return False
 
 def dbg(msg: str):
     if DEBUG_FEEDS:
@@ -102,7 +90,6 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         data = _blob.download_as_bytes()
         generation = _blob.generation
         state_data = orjson.loads(data)
-        # migracja starego formatu (lista -> dict)
         if isinstance(state_data.get("sent_links"), list):
             state_data["sent_links"] = {
                 link: datetime.now(timezone.utc).isoformat()
@@ -140,16 +127,12 @@ AL_POOL = [
     "pl-PL,pl;q=0.9,en-US;q=0.8,en;q=0.7",
     "en-US,en;q=0.9,pl-PL;q=0.7",
     "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
-    "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
 ]
 BASE_HEADERS = {
     "Accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, text/html;q=0.7,*/*;q=0.5",
     "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache",
-    "Pragma": "no-cache",
-    "DNT": "1",
-    "Upgrade-Insecure-Requests": "1",
-    "Connection": "keep-alive",
+    "Cache-Control": "no-cache", "Pragma": "no-cache", "DNT": "1",
+    "Upgrade-Insecure-Requests": "1", "Connection": "keep-alive",
 }
 
 def build_headers(url: str) -> Dict[str, str]:
@@ -170,525 +153,219 @@ def domain_root(url: str) -> str:
 def make_async_client() -> httpx.AsyncClient:
     limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
     return httpx.AsyncClient(
-        headers=BASE_HEADERS,
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        http2=True,
-        limits=limits,
-        cookies=httpx.Cookies()
-    )
-
-def make_async_client_with_proxy() -> httpx.AsyncClient:
-    limits = httpx.Limits(max_keepalive_connections=10, max_connections=20)
-    proxies = {"http://": PROXY_ALL, "https://": PROXY_ALL}
-    return httpx.AsyncClient(
-        headers=BASE_HEADERS,
-        timeout=HTTP_TIMEOUT,
-        follow_redirects=True,
-        http2=True,
-        limits=limits,
-        cookies=httpx.Cookies(),
-        proxies=proxies,
+        headers=BASE_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True,
+        http2=True, limits=limits, cookies=httpx.Cookies()
     )
 
 # --- SOURCES ---
 def get_web_sources() -> List[str]:
     try:
         with open('web_sources.txt', 'r', encoding='utf-8') as f:
-            sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-            log.info(f"Found {len(sources)} web sources for scraping.")
-            return sources
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
     except FileNotFoundError:
-        log.info("web_sources.txt not found. Skipping scraping.")
         return []
 
 def get_rss_sources() -> List[str]:
     try:
         with open('rss_sources.txt', 'r', encoding='utf-8') as f:
-            sources = [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
-            log.info(f"Found {len(sources)} RSS sources.")
-            return sources
+            return [line.strip() for line in f if line.strip() and not line.strip().startswith('#')]
     except FileNotFoundError:
-        log.error("CRITICAL: rss_sources.txt not found.")
         return []
 
-# --- TELEGRAM helpers ---
-def telegram_api_url(method: str) -> str:
-    token = env("TG_TOKEN")
-    if not token:
-        return ""
-    return f"https://api.telegram.org/bot{token}/{method}"
-
-async def telegram_call(method: str, payload: Dict[str, Any] | None = None) -> tuple[bool, Dict[str, Any] | str]:
-    url = telegram_api_url(method)
-    if not url:
-        log.error("TG_TOKEN is not set.")
-        return False, "missing_token"
-    async with make_async_client() as client:
-        try:
-            if payload is None:
-                r = await client.get(url, timeout=HTTP_TIMEOUT)
-            else:
-                r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
-            status = r.status_code
-            text = r.text
-            ok = False
-            body: Dict[str, Any] | str
-            try:
-                body = r.json()
-                ok = bool(body.get("ok"))
-            except Exception:
-                body = text
-
-            # <-- KLUCZOWA ZMIANA: zwracaj ok z TG, a nie „HTTP poszło”
-            if not ok:
-                log.error(f"TG API not ok: method={method} status={status} body={text[:500]}")
-
-            r.raise_for_status()
-            return ok, body
-        except Exception as e:
-            log.error(f"TG {method} error: {e}")
-            return False, str(e)
-
-# --- IMG helper (łączymy światy: og/twitter image + pierwszy <img>) ---
+# --- IMG helper ---
 async def find_og_image(client: httpx.AsyncClient, url: str) -> str | None:
     try:
         r = await client.get(url, headers=build_headers(url))
         r.raise_for_status()
         s = BeautifulSoup(r.text, "html.parser")
-        # 1) meta tags
-        for sel in (
-            'meta[property="og:image:secure_url"]',
-            'meta[property="og:image"]',
-            'meta[name="twitter:image"]',
-        ):
+        for sel in ('meta[property="og:image"]', 'meta[name="twitter:image"]'):
             tag = s.select_one(sel)
-            if tag and tag.get("content"):
-                img = tag["content"].strip()
-                if img.startswith("http"):
-                    return img
-        # 2) pierwszy obrazek w treści artykułu
+            if tag and tag.get("content") and tag["content"].strip().startswith("http"):
+                return tag["content"].strip()
         main = s.select_one("article") or s
-        img = main.select_one("img")
-        if img and img.get("src"):
-            src = img["src"].strip()
-            if src.startswith("http"):
-                return src
+        img_tag = main.select_one("img")
+        if img_tag and img_tag.get("src") and img_tag["src"].strip().startswith("http"):
+            return img_tag["src"].strip()
     except Exception:
         pass
     return None
 
-# --- SEND TG (najpierw nasze foto; inaczej pozwól TG zrobić preview) ---
+# --- TELEGRAM SENDER ---
 async def send_telegram_message_async(title: str, link: str, chat_id: str | None = None) -> bool:
-    chat = chat_id or env("TG_CHAT_ID")
-    token = env("TG_TOKEN")
-    if not token or not chat:
+    chat = chat_id or TG_CHAT_ID
+    if not TG_TOKEN or not chat:
         log.error("Brak TG_TOKEN/TG_CHAT_ID.")
         return False
 
-    import html
     safe_title = html.escape(title, quote=False)
     caption = f"<b>{safe_title}</b>\n\n{link}"
 
     try:
-        # spróbujmy znaleźć miniaturę sami
         async with make_async_client() as client:
             img = await find_og_image(client, link)
 
         if img:
-            # pewna miniatura (nasza)
-            url = f"https://api.telegram.org/bot{token}/sendPhoto"
-            payload = {"chat_id": chat, "photo": img, "caption": caption, "parse_mode": "HTML"}
+            method, payload = "sendPhoto", {"photo": img, "caption": caption}
         else:
-            # brak obrazka → oddaj preview Telegramowi
-            url = f"https://api.telegram.org/bot{token}/sendMessage"
-            payload = {
-                "chat_id": chat,
-                "text": caption,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False,  # <- pozwól TG na auto-preview
-            }
+            method, payload = "sendMessage", {"text": caption, "disable_web_page_preview": False}
+
+        payload.update({"chat_id": chat, "parse_mode": "HTML"})
+        url = f"https://api.telegram.org/bot{TG_TOKEN}/{method}"
 
         async with make_async_client() as client:
             r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
             body_text = r.text
             r.raise_for_status()
-            # jeżeli TG zwróci 200, ale ok=false — nie uznajemy tego za sukces
+
             if '"ok":false' in body_text.replace(" ", "").lower():
                 log.error(f"Telegram returned ok=false: body={body_text[:500]}")
                 return False
 
             log.info(f"Message sent: {title[:80]}… (with_photo={bool(img)})")
             return True
-
     except Exception as e:
         log.error(f"Telegram send error for {link}: {e}")
         return False
 
-# --- FETCH FEED (z pełnym śladem) ---
+# --- FETCH & SCRAPE ---
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
     headers = build_headers(url)
-    base = domain_root(url)
-
-    # pre-warm: cookies z homepage (często potrzebne przy WAF)
     try:
-        warm = await client.get(base, headers=headers)
-        dbg(f"warmup {base} -> {warm.status_code}")
+        r = await client.get(url, headers=headers)
+        if r.status_code == 200:
+            feed = feedparser.parse(r.content)
+            for entry in feed.entries:
+                if t := entry.get("title"):
+                    if l := entry.get("link"):
+                        posts.append((t, l))
+            log.info(f"Fetched {len(posts)} posts from RSS: {url}")
+            return posts
+        log.error(f"HTTP {r.status_code} for RSS: {url}")
     except Exception as e:
-        dbg(f"warmup error {base}: {e}")
-
-    last_status = None
-    for attempt in range(1, 4):  # 3 próby
-        try:
-            r = await client.get(url, headers=headers)
-            last_status = r.status_code
-            dbg(f"GET {url} -> {r.status_code}")
-            if r.status_code == 200:
-                feed = feedparser.parse(r.content)
-                dbg(f"Feed parsed: entries={len(feed.entries)}")
-                for i, entry in enumerate(feed.entries):
-                    t = entry.get("title")
-                    l = entry.get("link")
-                    if not t or not l:
-                        dbg(f"[{i}] SKIP (brak tytułu/linku) keys={list(entry.keys())}")
-                        continue
-                    dbg(f"[{i}] FETCHED title='{t[:90]}' link={l}")
-                    posts.append((t, l))
-                log.info(f"Fetched {len(posts)} posts from {url}")
-                return posts
-
-            if r.status_code in (403, 429, 503):
-                delay = 1.5 * attempt
-                log.warning(f"{url} -> {r.status_code}, retry in {delay:.1f}s")
-                await asyncio.sleep(delay)
-                continue
-
-            r.raise_for_status()
-
-        except httpx.HTTPStatusError as he:
-            code = he.response.status_code if he.response else None
-            log.error(f"HTTP {code} for {url}: {he}")
-            break
-        except Exception as e:
-            log.error(f"Error fetching RSS {url}: {e}")
-            await asyncio.sleep(1.0 * attempt)
-
-    # Fallback: alternatywny link RSS na homepage
-    try:
-        html_resp = await client.get(base, headers=headers)
-        if html_resp.status_code == 200:
-            soup = BeautifulSoup(html_resp.text, "html.parser")
-            alt = soup.select_one('link[rel="alternate"][type*="rss"]')
-            if alt and alt.get("href"):
-                href = alt["href"]
-                alt_url = href if "://" in href else base.rstrip("/") + "/" + href.lstrip("/")
-                if alt_url != url:
-                    log.info(f"Fallback: trying alt feed {alt_url}")
-                    return await fetch_feed(client, alt_url)
-    except Exception as e:
-        log.warning(f"Fallback HTML failed for {base}: {e}")
-
-    log.error(f"Feed blocked or unavailable: {url} (last_status={last_status})")
+        log.error(f"Error fetching RSS {url}: {e}")
     return []
 
-# --- SCRAPER (te same nagłówki/klient) ---
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
     headers = build_headers(url)
     try:
-        try:
-            await client.get(domain_root(url), headers=headers)
-        except Exception:
-            pass
-
         r = await client.get(url, headers=headers)
         r.raise_for_status()
         soup = BeautifulSoup(r.text, 'html.parser')
 
+        selectors = []
         if "travel-dealz.com" in url:
-            for article in soup.select('article.article-item, article.article'):
-                link_tag = article.select_one('h2.article-title a, h2 a')
-                if link_tag and (href := link_tag.get('href')):
-                    posts.append((link_tag.get_text(strip=True), href))
-
+            selectors = ['article.article-item h2 a', 'article.article h2 a']
         elif "secretflying.com" in url:
-            for article in soup.select('article.post-item, article'):
-                link_tag = article.select_one('.post-title a, h2 a')
-                if link_tag and (href := link_tag.get('href')):
-                    title = link_tag.get_text(strip=True)
-                    posts.append((title, href))
-
-        elif "flynous.com" in url:
-            for a in soup.select("h2.entry-title a, h3.entry-title a, article h2 a, article .entry-title a"):
-                href = a.get("href")
-                title = a.get_text(strip=True)
-                if href and title:
-                    posts.append((title, href))
-
+            selectors = ['article.post-item .post-title a', 'article h2 a']
         elif "wakacyjnipiraci.pl" in url:
-            for article in soup.select('article.post-list__item, article'):
-                link_tag = article.select_one('a.post-list__link, h2 a')
-                if link_tag and (href := link_tag.get('href')):
-                    title_tag = article.select_one('h2.post-list__title, h2')
-                    if title_tag:
-                        posts.append((title_tag.get_text(strip=True), href))
-
-        elif "loter.pl" in url:
-            for a in soup.select("article a, h2 a, .post-title a"):
-                href = a.get("href")
-                title = a.get_text(strip=True)
-                if href and title and href.startswith("http"):
+            selectors = ['article.post-list__item a.post-list__link']
+        
+        for sel in selectors:
+            for link_tag in soup.select(sel):
+                if href := link_tag.get('href'):
+                    title_tag = link_tag.find_parent('article').select_one('h2, h3') if 'wakacyjnipiraci' in url else link_tag
+                    title = title_tag.get_text(strip=True) if title_tag else 'Brak tytułu'
                     posts.append((title, href))
-
-        log.info(f"Scraped {len(posts)} posts from {url}")
+        
+        log.info(f"Scraped {len(posts)} posts from Web: {url}")
         return posts
-
-    except httpx.HTTPStatusError as he:
-        code = he.response.status_code if he.response else None
-        log.error(f"Scrape HTTP {code} {url}: {he}")
-        return []
     except Exception as e:
-        log.error(f"Error scraping webpage {url}: {e}")
+        log.error(f"Error scraping {url}: {e}")
         return []
 
-# --- MAIN FLOW (zapis dopiero po UDANEJ wysyłce) ---
+# --- MAIN FLOW ---
 async def process_feeds_async() -> str:
-    log.info("Starting hybrid processing (RSS + Scraping).")
-    if not env("TG_TOKEN") or not env("TG_CHAT_ID"):
+    log.info("Starting hybrid processing.")
+    if not TG_TOKEN or not TG_CHAT_ID:
         return "Missing TG_TOKEN/TG_CHAT_ID."
 
-    rss_sources = get_rss_sources()
-    web_sources = get_web_sources()
-    if not rss_sources and not web_sources:
-        return "No RSS or Web sources found."
+    sources = get_rss_sources() + get_web_sources()
+    if not sources:
+        return "No sources found."
 
-    # rozmyj fingerprint bota
-    random.shuffle(rss_sources)
-    random.shuffle(web_sources)
-
+    random.shuffle(sources)
     state, generation = load_state()
     sent_links_dict: Dict[str, str] = state.get("sent_links", {})
 
-    async with make_async_client() as client_plain:
-        client_proxy = make_async_client_with_proxy() if PROXY_ALL else None
-
-        async def pick_client(u: str) -> httpx.AsyncClient:
-            if client_proxy and needs_proxy(u):
-                return client_proxy
-            return client_plain
-
+    all_posts = []
+    async with make_async_client() as client:
         tasks = []
-        delay = 0.0
+        for url in sources:
+            # Proste rozróżnienie na podstawie nazwy pliku lub zawartości
+            if any(rss_domain in url for rss_domain in ["rss", "feed", ".xml"]):
+                tasks.append(fetch_feed(client, url))
+            else:
+                tasks.append(scrape_webpage(client, url))
+        
+        results = await asyncio.gather(*tasks)
+        for post_list in results:
+            all_posts.extend(post_list)
 
-        for url in rss_sources:
-            delay += random.uniform(0.0, 0.3)  # jitter 0–300 ms
-            async def job(u=url, d=delay):
-                await asyncio.sleep(d)
-                c = await pick_client(u)
-                return await fetch_feed(c, u)
-            tasks.append(job())
-
-        for url in web_sources:
-            delay += random.uniform(0.0, 0.3)
-            async def job(u=url, d=delay):
-                await asyncio.sleep(d)
-                c = await pick_client(u)
-                return await scrape_webpage(c, u)
-            tasks.append(job())
-
-        results = await asyncio.gather(*tasks, return_exceptions=False)
-
-        if client_proxy:
-            await client_proxy.aclose()
-
-    all_posts = [post for post_list in results for post in post_list]
-    if MAX_POSTS_PER_RUN > 0 and len(all_posts) > MAX_POSTS_PER_RUN:
+    if MAX_POSTS_PER_RUN > 0:
         all_posts = all_posts[:MAX_POSTS_PER_RUN]
-    dbg(f"ALL_POSTS total={len(all_posts)}")
 
     candidates: List[Tuple[str, str]] = []
-    now_utc = datetime.now(timezone.utc)
-
-    dup_count = 0
-    dup_samples: List[str] = []
-
-    for idx, (title, link) in enumerate(all_posts):
+    for title, link in all_posts:
         canonical = canonicalize_url(link)
         if DISABLE_DEDUP or canonical not in sent_links_dict:
             candidates.append((title, link))
-            dbg(f"NEW [{idx}] {canonical}  title='{title[:90]}'")
-        else:
-            dup_count += 1
-            if len(dup_samples) < 5:
-                dup_samples.append(canonical)
-            dbg(f"DUP  [{idx}] {canonical}")
+            sent_links_dict[canonical] = "processing" # Oznacz jako przetwarzany
 
-    log.info(
-        f"Summary(before send): seen={len(all_posts)}, new_candidates={len(candidates)}, duplicates={dup_count}"
-        + (f", dup_samples={dup_samples}" if DEBUG_FEEDS and dup_samples else "")
-    )
+    # Usuń duplikaty kandydatów
+    unique_candidates = list({canonicalize_url(l): (t, l) for t, l in candidates}.values())
+    
+    log.info(f"Summary: seen={len(all_posts)}, new_candidates={len(unique_candidates)}")
 
     sent_count = 0
-    if candidates:
-        log.info(f"Found {len(candidates)} new posts. Sending.")
-        results = await asyncio.gather(*[
-            send_telegram_message_async(t, l) for t, l in candidates
-        ])
+    now_utc_iso = datetime.now(timezone.utc).isoformat()
+    if unique_candidates:
+        results = await asyncio.gather(*[send_telegram_message_async(t, l) for t, l in unique_candidates])
 
-        # zapisz TYLKO te, które poszły
-        for (t, l), ok in zip(candidates, results):
+        for (t, l), ok in zip(unique_candidates, results):
             if ok:
-                sent_links_dict[canonicalize_url(l)] = now_utc.isoformat()
+                sent_links_dict[canonicalize_url(l)] = now_utc_iso
                 sent_count += 1
-
-        if DEBUG_FEEDS and sent_count:
-            sample_titles = [t[:90] for (t, _), ok in zip(candidates, results) if ok][:5]
-            log.info(f"Sent sample titles: {sample_titles}")
-    else:
-        log.info("Found 0 new posts. Nothing to send.")
-
-    # cleanup >30 dni
-    thirty_days_ago = now_utc - timedelta(days=30)
-    cleaned_sent_links = {}
-    for link, ts in sent_links_dict.items():
-        try:
-            when = datetime.fromisoformat(ts)
-        except Exception:
-            when = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-        if when > thirty_days_ago:
-            cleaned_sent_links[link] = ts
-
-    log.info(f"Memory cleanup: before={len(sent_links_dict)}, after={len(cleaned_sent_links)}")
+    
+    # Czyszczenie starych linków i tych, których nie udało się wysłać
+    thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
+    cleaned_sent_links = {
+        link: ts for link, ts in sent_links_dict.items()
+        if ts != "processing" and datetime.fromisoformat(ts.replace("Z", "+00:00")) > thirty_days_ago
+    }
     state["sent_links"] = cleaned_sent_links
-
+    
     try:
         save_state_atomic(state, generation)
     except RuntimeError as e:
         log.critical(f"State save failure: {e}")
         return f"Critical: {e}"
 
-    result_msg = f"Done. Sent {sent_count} posts."
+    result_msg = f"Done. Sent {sent_count} of {len(unique_candidates)} new posts."
     log.info(result_msg)
     return result_msg
 
 # --- ROUTES ---
-@app.get("/")
+@app.route("/")
 def index():
     return "Travel-Bot vHYBRID — działa!", 200
 
-@app.get("/healthz")
+@app.route("/healthz")
 def healthz():
     return jsonify({"status": "ok"}), 200
 
-def _is_start_command(update: Dict[str, Any]) -> bool:
-    msg = update.get("message", {})
-    text = (msg.get("text") or "").strip()
-    if not text:
-        return False
-    if text.lower().startswith("/start"):
-        return True
-    for ent in msg.get("entities", []):
-        if ent.get("type") == "bot_command" and (text[ent["offset"]: ent["offset"]+ent["length"]]).lower().startswith("/start"):
-            return True
-    return False
-
-@app.post("/tg/webhook")
-def telegram_webhook():
-    if TELEGRAM_SECRET:
-        secret_header = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
-        if secret_header != TELEGRAM_SECRET:
-            log.warning("Webhook secret mismatch.")
-            return "Forbidden", 403
-
-    update = request.get_json(silent=True) or {}
-    if _is_start_command(update):
-        chat = update.get("message", {}).get("chat", {})
-        chat_id = str(chat.get("id")) if chat else env("TG_CHAT_ID")
-        async def _run():
-            await send_telegram_message_async(
-                title="Cześć! 👋",
-                link="Bot działa — poluję na okazje i sam po sobie sprzątam.",
-                chat_id=chat_id,
-            )
-        asyncio.run(_run())
-    return "OK", 200
-
-@app.post("/tasks/rss")
+@app.route("/tasks/rss", methods=['POST'])
 def handle_rss_task():
     log.info("Received /tasks/rss", extra={"event": "job_start", "ua": request.headers.get("User-Agent")})
     try:
         result = asyncio.run(process_feeds_async())
         code = 200 if "Critical" not in result else 500
-        log.info("Finished /tasks/rss", extra={"event": "job_done", "status": code, "result": result})
         return result, code
     except Exception as e:
         log.exception("Unhandled error in /tasks/rss")
         return f"Server error: {e}", 500
 
-# --- DIAGNOSTYKA / POMOC ---
-@app.get("/debug/state")
-def debug_state():
-    state, _ = load_state()
-    sent = state.get("sent_links", {})
-    last = sorted(sent.items(), key=lambda kv: kv[1], reverse=True)[:10]
-    return jsonify({
-        "count": len(sent),
-        "sample_last": [{"url": k, "ts": v} for k, v in last]
-    }), 200
-
-@app.get("/debug/check")
-def debug_check():
-    return jsonify({
-        "env": {
-            "TG_CHAT_ID": env("TG_CHAT_ID"),
-            "BUCKET_NAME": env("BUCKET_NAME"),
-            "SENT_LINKS_FILE": env("SENT_LINKS_FILE"),
-            "HTTP_TIMEOUT": env("HTTP_TIMEOUT"),
-            "DEBUG_FEEDS": env("DEBUG_FEEDS"),
-            "DISABLE_DEDUP": env("DISABLE_DEDUP"),
-            "PUBLIC_BASE_URL": env("PUBLIC_BASE_URL"),
-            "ENABLE_WEBHOOK": env("ENABLE_WEBHOOK"),
-        }
-    }), 200
-
-@app.get("/debug/telegram/getMe")
-def debug_tg_getme():
-    ok, body = asyncio.run(telegram_call("getMe"))
-    return (jsonify(body), 200) if ok else (str(body), 500)
-
-@app.post("/debug/telegram/ping")
-def debug_tg_ping():
-    try:
-        title = request.json.get("title", "Self-test from Cloud Run ✅")
-        link = request.json.get("link", "Ping.")
-    except Exception:
-        title, link = "Self-test from Cloud Run ✅", "Ping."
-    ok = asyncio.run(send_telegram_message_async(title, link))
-    return (jsonify({"ok": True}), 200) if ok else ("TG send failed", 500)
-
-@app.get("/debug/sources")
-def debug_sources():
-    return jsonify({
-        "rss": get_rss_sources(),
-        "web": get_web_sources(),
-    }), 200
-
-@app.post("/tg/set_webhook")
-def set_webhook():
-    if not ENABLE_WEBHOOK:
-        return "webhook disabled", 200
-    base = PUBLIC_BASE_URL
-    if not base:
-        return "Set PUBLIC_BASE_URL first.", 400
-    url = f"{base.rstrip('/')}/tg/webhook"
-    params = {"url": url}
-    if TELEGRAM_SECRET:
-        params["secret_token"] = TELEGRAM_SECRET
-    ok, body = asyncio.run(telegram_call("setWebhook", params))
-    return (jsonify(body), 200) if ok else (str(body), 500)
-
 if __name__ == "__main__":
     port = int(env("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=True)
-    
+    app.run(host="0.0.0.0", port=port, debug=False)
