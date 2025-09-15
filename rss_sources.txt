@@ -11,4 +11,5 @@ https://thebarefootnomad.com/feed
 https://www.travelzoo.com/feed
 https://travelfree.info/feed/
 https://www.theflightdeal.com/feed
+https://feeds.feedburner.com/MlecznePodroze
 
