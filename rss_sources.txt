@@ -1,7 +1,6 @@
 # Moje kanały RSS - Travel Bot
 https://www.fly4free.pl/feed/
 https://www.fly4free.com/feed/
-https://www.flynous.com/feed/
 https://travel-dealz.com/feed
 https://feeds.feedburner.com/TheFlightDeal
 https://www.journeybeyondtravel.com/blog/feed/
