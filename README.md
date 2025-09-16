@@ -16,6 +16,34 @@ README.md.
 
 ---
 
+[🇵🇱 Instrukcja PL ↓](#-instrukcja-polski) | [🇬🇧 English guide ↓](#-instructions-english)
+
+---
+
+# 🇵🇱 Instrukcja (Polski)
+
+### Funkcje
+- Pobiera dane z **RSS** i prosty **scraping** stron podróżniczych  
+- Wysyła do Telegrama:
+  - ze zdjęciem (`sendPhoto`), jeśli znajdzie `og:image/twitter:image`  
+  - zwykły link (`sendMessage`) z podglądem, jeśli brak miniatury  
+- **Dedup**: ten sam link nie zostanie wysłany dwa razy  
+- **Czyszczenie co 30 dni** — starsze wpisy znikają z pliku `sent_links.json`  
+- Stabilne limity czasu, retry do Telegrama, asynchroniczne pobieranie  
+
+### Uruchomienie lokalne
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+export TG_TOKEN="123:ABC..."
+export TG_CHAT_ID="-1001234567890"
+export BUCKET_NAME="travel-bot-storage-patrykmozeluk-cloud"
+export SENT_LINKS_FILE="sent_links.json"
+
+python app.py
+curl -X POST http://localhost:8080/tasks/rss
+
 
 
 # ✈️ Travel-Bot
