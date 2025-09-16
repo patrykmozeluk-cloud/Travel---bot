@@ -151,10 +151,6 @@ Look for "chat":{"id": ... } — that’s your TG_CHAT_ID.
 
 For groups it usually looks like -1001234567890.
 
-
-
-
-
 ---
 
 Local run
@@ -187,7 +183,6 @@ TG_TOKEN, TG_CHAT_ID, BUCKET_NAME, SENT_LINKS_FILE
 optional: HTTP_TIMEOUT=20.0, SEND_TIMEOUT_S=15, MAX_POSTS_PER_RUN=15
 
 
-
 Cloud Scheduler
 
 Cron: */15 * * * *
@@ -198,12 +193,31 @@ Headers: Content-Type: application/json
 
 Retry: max 5 attempts, min backoff 30s, max backoff 10m, deadline 60s
 
-
-
 ---
 
 ⬆️ Back to top | 🇵🇱 Instrukcja PL ↑
 
+
+---
+
+⚠️ Known issues / Typowe błędy w logach
+
+send failed for <URL>:
+↳ najczęściej timeout podczas wysyłki do Telegrama.
+Normalne, link spróbuje się wysłać ponownie w następnym cyklu.
+Można zwiększyć SEND_TIMEOUT_S do 15 s.
+
+503 + długi latency w logach Cloud Run
+↳ zimny start lub wolna odpowiedź z serwisu źródłowego.
+Scheduler automatycznie ponawia próbę.
+
+Telegram returned ok=false
+↳ zwykle problem z uprawnieniami bota w grupie/kanale.
+Sprawdź, czy bot ma prawo pisać do tej grupy.
+
+Brak miniaturek przy niektórych linkach
+↳ strona nie udostępnia og:image/twitter:image albo obrazek jest za duży.
+Bot wtedy wyśle zwykły link z podglądem strony.
 
 ---
 
