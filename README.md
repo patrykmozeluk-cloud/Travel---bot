@@ -2,6 +2,24 @@ README.md.
 
 # ✈️ Travel-Bot
 
+> 🇵🇱 **TL;DR (skrót)**  
+> Bot pobiera oferty z RSS i stron, filtruje duplikaty i wysyła **świeże linki + miniatury** na Telegram.  
+> Działa na **Google Cloud Run (Gen1)**, odpalany co **15 minut** przez **Cloud Scheduler**.  
+> Token i ID czatu trzymasz w zmiennych środowiskowych.  
+> Stare wpisy są czyszczone po **30 dniach**.
+
+> 🇬🇧 **TL;DR (short)**  
+> The bot fetches travel deals from RSS & websites, removes duplicates, and sends **fresh links + thumbnails** to Telegram.  
+> Runs on **Google Cloud Run (Gen1)**, triggered every **15 minutes** by **Cloud Scheduler**.  
+> Token and chat ID are stored in environment variables.  
+> Old entries are cleaned after **30 days**.
+
+---
+
+
+
+# ✈️ Travel-Bot
+
 Automatyczny bot do śledzenia źródeł (RSS i strony WWW) i wysyłania **świeżych ofert** na Telegram.  
 Runs on **Google Cloud Run (Gen1)**, triggered every **15 minutes** by **Cloud Scheduler**.
 
