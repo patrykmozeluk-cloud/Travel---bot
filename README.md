@@ -16,7 +16,8 @@ README.md.
 
 ---
 
-[🇵🇱 Instrukcja PL ↓](#-instrukcja-polski) | [🇬🇧 English guide ↓](#-instructions-english)
+[🇵🇱 Instrukcja PL ↓](#-instrukcja-polski) |
+[🇬🇧 English guide ↓](#-instructions-english)
 
 ---
 
