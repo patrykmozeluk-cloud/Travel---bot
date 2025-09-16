@@ -1,4 +1,4 @@
-README.md.
+---
 
 # ✈️ Travel-Bot
 
@@ -16,8 +16,7 @@ README.md.
 
 ---
 
-[🇵🇱 Instrukcja PL ↓](#-instrukcja-polski) |
-[🇬🇧 English guide ↓](#-instructions-english)
+[🇵🇱 Instrukcja PL ↓](#-instrukcja-polski) | [🇬🇧 English guide ↓](#-instructions-english)
 
 ---
 
@@ -32,38 +31,27 @@ README.md.
 - **Czyszczenie co 30 dni** — starsze wpisy znikają z pliku `sent_links.json`  
 - Stabilne limity czasu, retry do Telegrama, asynchroniczne pobieranie  
 
-### Uruchomienie lokalne
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+### 🔑 Jak zdobyć token i chat_id w Telegramie
+1. **Token bota (`TG_TOKEN`)**  
+   - Otwórz Telegram i znajdź użytkownika [@BotFather](https://t.me/BotFather).  
+   - Wpisz `/newbot` i nadaj nazwę + unikalny login (np. `TravelBot123_bot`).  
+   - BotFather poda Ci token w formacie:  
+     ```
+     1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
+     ```
+   - Ten token wpisz do zmiennej środowiskowej `TG_TOKEN`.
 
-export TG_TOKEN="123:ABC..."
-export TG_CHAT_ID="-1001234567890"
-export BUCKET_NAME="travel-bot-storage-patrykmozeluk-cloud"
-export SENT_LINKS_FILE="sent_links.json"
-
-python app.py
-curl -X POST http://localhost:8080/tasks/rss
-
-
-
-# ✈️ Travel-Bot
-
-Automatyczny bot do śledzenia źródeł (RSS i strony WWW) i wysyłania **świeżych ofert** na Telegram.  
-Runs on **Google Cloud Run (Gen1)**, triggered every **15 minutes** by **Cloud Scheduler**.
+2. **ID czatu (`TG_CHAT_ID`)**  
+   - Dodaj swojego bota do grupy/kanalu.  
+   - Napisz w tej grupie jakąś wiadomość.  
+   - Wejdź w przeglądarkę:  
+     ```
+     https://api.telegram.org/bot<TG_TOKEN>/getUpdates
+     ```
+   - W odpowiedzi JSON znajdziesz pole `"chat":{"id": ... }` — to jest Twój `TG_CHAT_ID`.  
+   - Dla grup ma format np. `-1001234567890`.
 
 ---
-
-## 🇵🇱 Instrukcja (Polski)
-
-### Funkcje
-- Pobiera dane z **RSS** i prosty **scraping** stron podróżniczych  
-- Wysyła do Telegrama:
-  - ze zdjęciem (`sendPhoto`), jeśli znajdzie `og:image/twitter:image`  
-  - zwykły link (`sendMessage`) z podglądem, jeśli brak miniatury  
-- **Dedup**: ten sam link nie zostanie wysłany dwa razy  
-- **Czyszczenie co 30 dni** — starsze wpisy znikają z pliku `sent_links.json`  
-- Stabilne limity czasu, retry do Telegrama, asynchroniczne pobieranie  
 
 ### Uruchomienie lokalne
 ```bash
@@ -110,6 +98,11 @@ Retry: max 5 prób, min backoff 30s, max backoff 10m, deadline 60s
 
 ---
 
+⬆️ Back to top | 🇬🇧 English guide ↓
+
+
+---
+
 🇬🇧 Instructions (English)
 
 Features
@@ -129,6 +122,42 @@ Deduplication: no duplicates across runs
 
 Stable timeouts, retries to Telegram, async fetching
 
+
+🔑 How to get Telegram token & chat_id
+
+1. Bot token (TG_TOKEN)
+
+Open Telegram and talk to @BotFather.
+
+Send /newbot → choose a name and unique username (e.g. TravelBot123_bot).
+
+BotFather will give you a token like:
+
+1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
+
+Save this as TG_TOKEN.
+
+
+
+2. Chat ID (TG_CHAT_ID)
+
+Add your bot to a group/channel.
+
+Send a test message.
+
+Open in browser:
+
+https://api.telegram.org/bot<TG_TOKEN>/getUpdates
+
+Look for "chat":{"id": ... } — that’s your TG_CHAT_ID.
+
+For groups it usually looks like -1001234567890.
+
+
+
+
+
+---
 
 Local run
 
@@ -175,6 +204,11 @@ Retry: max 5 attempts, min backoff 30s, max backoff 10m, deadline 60s
 
 ---
 
+⬆️ Back to top | 🇵🇱 Instrukcja PL ↑
+
+
+---
+
 📂 Repo layout
 
 .github/workflows/cron.yml   # optional GitHub Actions scheduler
@@ -184,15 +218,15 @@ requirements.txt
 rss_sources.txt
 web_sources.txt
 
-
----
-
 🔒 Security
 
 Keep TG_TOKEN in environment variables/secrets
 
 Optional: protect /tasks/rss with header X-Task-Secret
 
-License:
 
-MIT 
+📜 License
+
+MIT
+
+---
