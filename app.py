@@ -103,6 +103,8 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
                 link: datetime.now(timezone.utc).isoformat()
                 for link in state_data["sent_links"]
             }
+        if "sent_links" not in state_data or not isinstance(state_data["sent_links"], dict):
+            state_data["sent_links"] = {}
         return state_data, generation
     except Exception as e:
         log.warning(f"load_state fallback: {e}")
@@ -113,11 +115,13 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
     for attempt in range(retries):
         try:
             if expected_generation is None:
+                # create-if-not-exists
                 _blob.upload_from_string(payload, if_generation_match=0, content_type="application/json")
             else:
                 _blob.upload_from_string(payload, if_generation_match=expected_generation, content_type="application/json")
             return
         except Exception as e:
+            # precondition failed => reload generation and retry
             if "PreconditionFailed" in str(e) or "412" in str(e):
                 time.sleep(0.5)
                 _, expected_generation = load_state()
@@ -215,7 +219,7 @@ def domain_root(url: str) -> str:
 def make_async_client() -> httpx.AsyncClient:
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40)
     return httpx.AsyncClient(
-        headers=BASE_HEADERS,
+        headers=BASE_HEADERS,  # per-request nadpisujemy przez build_headers()
         timeout=HTTP_TIMEOUT,
         follow_redirects=True,
         http2=True,
@@ -311,7 +315,7 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
         async with _sem_for(url):
             await _jitter()
             r = await client.get(url, headers=build_headers(url))
-        # sniffer: HTML zamiast XML (diagnostyka bez zmiany logiki)
+        # Sniffer: HTML zamiast XML (diagnostyka)
         if r.status_code == 200 and r.content[:64].lstrip().lower().startswith(b"<html"):
             log.info(f"RSS looks like HTML (not XML): {url} [Content-Type={r.headers.get('Content-Type')}]")
         if r.status_code == 200:
@@ -439,17 +443,18 @@ async def process_feeds_async() -> str:
     async with make_async_client() as client:
         tasks = []
         for url in sources:
-            is_rss = any(tok in url for tok in ["rss", "feed", ".xml"])
-            if is_rss and url in web:
-                pass
+            is_rss = any(tok in url.lower() for tok in ["rss", "feed", ".xml"])
             if is_rss:
                 tasks.append(fetch_feed(client, url))
             else:
                 tasks.append(scrape_webpage(client, url))
 
-        results = await asyncio.gather(*tasks)
-        for post_list in results:
-            all_posts.extend(post_list)
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        for res in results:
+            if isinstance(res, Exception):
+                log.info(f"Task error: {res}")
+                continue
+            all_posts.extend(res)
 
     if MAX_POSTS_PER_RUN > 0:
         all_posts = all_posts[:MAX_POSTS_PER_RUN]
@@ -464,14 +469,16 @@ async def process_feeds_async() -> str:
     # per-domain cap również na kandydatów
     per_host_count: Dict[str, int] = {}
     unique_candidates: List[Tuple[str, str]] = []
+    seen_keys = set()
     for t, l in candidates:
         key = canonicalize_url(l)
+        if key in seen_keys:
+            continue
         host = urlparse(l).netloc.lower().replace("www.", "")
         if per_host_count.get(host, 0) >= MAX_PER_DOMAIN:
             continue
-        if key in {canonicalize_url(x[1]) for x in unique_candidates}:
-            continue
         unique_candidates.append((t, l))
+        seen_keys.add(key)
         per_host_count[host] = per_host_count.get(host, 0) + 1
 
     log.info(f"Summary: seen={len(all_posts)}, new_candidates={len(unique_candidates)}")
@@ -479,42 +486,27 @@ async def process_feeds_async() -> str:
     sent_count = 0
     now_utc_iso = datetime.now(timezone.utc).isoformat()
     if unique_candidates:
-        results = await asyncio.gather(*[send_telegram_message_async(t, l) for t, l in unique_candidates])
+        results = await asyncio.gather(*[send_telegram_message_async(t, l) for t, l in unique_candidates], return_exceptions=True)
         for (t, l), ok in zip(unique_candidates, results):
+            if isinstance(ok, Exception):
+                log.error(f"Send error for {l}: {ok}")
+                continue
             if ok:
                 sent_links_dict[canonicalize_url(l)] = now_utc_iso
                 sent_count += 1
 
     # cleanup: 30 dni
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
-    cleaned_sent_links = {
-        link: ts for link, ts in sent_links_dict.items()
-        if ts != "processing" and datetime.fromisoformat(ts.replace("Z", "+00:00")) > thirty_days_ago
-    }
-    state["sent_links"] = cleaned_sent_links
-
-    try:
-        save_state_atomic(state, generation)
-    except RuntimeError as e:
-        log.critical(f"State save failure: {e}")
-        return f"Critical: {e}"
-
-    result_msg = f"Done. Sent {sent_count} of {len(unique_candidates)} new posts."
-    log.info(result_msg)
-    return result_msg
-
-# --- ROUTES ---
-@app.route("/")
-def index():
-    return "Travel-Bot vHYBRID — działa!", 200
-
-@app.route("/healthz")
-def healthz():
-    return jsonify({"status": "ok"}), 200
-
-@app.route("/tasks/rss", methods=['POST'])
-def handle_rss_task():
-    log.info("Received /tasks/rss", extra={"event": "job_start", "ua": request.headers.get("User-Agent")})
-    try:
-        result = asyncio.run(process_feeds_async())
-    
+    cleaned_sent_links = {}
+    for link, ts in sent_links_dict.items():
+        if ts == "processing":
+            continue
+        try:
+            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except Exception:
+            # jeśli kiedyś zapisano coś dziwnego – zostaw, nie psuj
+            cleaned_sent_links[link] = ts
+            continue
+        if dt > thirty_days_ago:
+            cleaned_sent_links[link] = ts
+    state["s
