@@ -61,7 +61,7 @@ pip install -r requirements.txt
 
 export TG_TOKEN="123:ABC..."
 export TG_CHAT_ID="-1001234567890"
-export BUCKET_NAME="travel-bot-storage-patrykmozeluk-cloud"
+export BUCKET_NAME="twoja-wlasna-nazwa-bucketa"
 export SENT_LINKS_FILE="sent_links.json"
 
 python app.py
@@ -155,7 +155,7 @@ pip install -r requirements.txt
 
 export TG_TOKEN="123:ABC..."
 export TG_CHAT_ID="-1001234567890"
-export BUCKET_NAME="travel-bot-storage-patrykmozeluk-cloud"
+export BUCKET_NAME="your-own-bucket-name"
 export SENT_LINKS_FILE="sent_links.json"
 
 python app.py
