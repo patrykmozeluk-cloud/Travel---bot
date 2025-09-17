@@ -143,7 +143,10 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
     "wakacyjnipiraci.pl": {
         "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
         "al": "pl-PL,pl;q=0.9,en-US;q=0.8",
-        "referer": "https://wakacyjnipiraci.pl/"
+        "referer": "https://wakacyjnipiraci.pl/",
+        # --- HOTFIX tylko dla RSS na tym hostcie ---
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
     }
 }
 
@@ -158,11 +161,21 @@ def build_headers(url: str) -> Dict[str, str]:
     p = urlparse(url)
     host = p.netloc.lower().replace("www.","")
     h = dict(BASE_HEADERS)
+
+    # rozpoznaj feed po ścieżce/zapytaniu
+    pathq = (p.path or "") + ("?" + p.query if p.query else "")
+    is_rss = any(tok in pathq.lower() for tok in ("/feed", "rss", ".xml", "?feed"))
+
     ident = STICKY_IDENTITY.get(host)
     if ident:
         h["User-Agent"] = ident["ua"]
         h["Accept-Language"] = ident["al"]
         h["Referer"] = ident["referer"]
+
+        # per-host fix tylko dla RSS na wakacyjnipiraci.pl
+        if is_rss and ident.get("rss_no_brotli") == "1":
+            h["Accept-Encoding"] = "gzip, deflate"  # bez 'br'
+            h["Accept"] = ident.get("rss_accept", h.get("Accept", "application/xml,*/*;q=0.7"))
     else:
         # fallback – ale też "ludzko"
         h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
@@ -269,8 +282,13 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
         async with _sem_for(url):
             await _jitter()
             r = await client.get(url, headers=build_headers(url))
+        # sniffer: HTML zamiast XML (diagnostyka bez zmiany logiki)
+        if r.status_code == 200 and r.content[:64].lstrip().lower().startswith(b"<html"):
+            log.info(f"RSS looks like HTML (not XML): {url} [Content-Type={r.headers.get('Content-Type')}]")
         if r.status_code == 200:
             feed = feedparser.parse(r.content)
+            if getattr(feed, "bozo", 0):
+                log.info(f"feedparser bozo for {url}: {getattr(feed, 'bozo_exception', '')}")
             for entry in feed.entries:
                 t = entry.get("title")
                 l = entry.get("link")
