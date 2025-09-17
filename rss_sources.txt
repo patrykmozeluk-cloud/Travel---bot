@@ -2,7 +2,10 @@
 https://www.fly4free.pl/feed/
 https://www.fly4free.com/feed/
 https://marocmama.com/feed
-https://thebarefootnomad.com/feed
+https://marocmama.com/moroccan-food/feed
+https://www.thebarefootnomad.com/feed
+https://www.thebarefootnomad.com/posts/feed
+https://www.thebarefootnomad.com/topics/asia/feed
 https://www.travelzoo.com/feed
 https://travelfree.info/feed/
 https://www.theflightdeal.com/feed
