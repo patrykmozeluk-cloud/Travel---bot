@@ -31,23 +31,25 @@
 - Stabilne limity czasu, retry do Telegrama, asynchroniczne pobieranie  
 
 ### 🔑 Jak zdobyć token i chat_id w Telegramie
+
 1. **Token bota (`TG_TOKEN`)**  
-   - Otwórz Telegram i znajdź użytkownika [@BotFather](https://t.me/BotFather).  
-   - Wpisz `/newbot` i nadaj nazwę + unikalny login (np. `TravelBot123_bot`).  
+   - Tokeny nadaje tylko [@BotFather](https://t.me/BotFather).  
+   - Otwórz czat z BotFather → wpisz `/newbot` → wybierz nazwę i login (np. `TravelBot123_bot`).  
    - BotFather poda Ci token w formacie:  
      ```
      1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
      ```
-   - Ten token wpisz do zmiennej środowiskowej `TG_TOKEN`.
+   - Ten token zapisz w zmiennej środowiskowej `TG_TOKEN`.
 
 2. **ID czatu (`TG_CHAT_ID`)**  
-   - Dodaj swojego bota do grupy/kanalu.  
-   - Napisz w tej grupie jakąś wiadomość.  
-   - Wejdź w przeglądarkę:  
+   Masz dwie opcje:  
+   - **Szybka metoda**: dodaj do grupy/kanału bota narzędziowego [@userinfobot](https://t.me/userinfobot).  
+     Odpowie Ci od razu z `chat_id`.  
+   - **Oficjalna metoda**: dodaj swojego bota, wyślij wiadomość w grupie/kanału i otwórz:  
      ```
      https://api.telegram.org/bot<TG_TOKEN>/getUpdates
      ```
-   - W odpowiedzi JSON znajdziesz pole `"chat":{"id": ... }` — to jest Twój `TG_CHAT_ID`.  
+     W odpowiedzi JSON znajdziesz `"chat":{"id": ... }` → to Twój `TG_CHAT_ID`.  
    - Dla grup ma format np. `-1001234567890`.
 
 ---
@@ -122,33 +124,27 @@ Deduplication: no duplicates across runs
 Stable timeouts, retries to Telegram, async fetching
 
 
-🔑 How to get Telegram token & chat_id
+### 🔑 How to get Telegram token & chat_id
 
-1. Bot token (TG_TOKEN)
+1. **Bot token (`TG_TOKEN`)**  
+   - Tokens are only issued by [@BotFather](https://t.me/BotFather).  
+   - Open BotFather → send `/newbot` → choose a name and unique username (e.g. `TravelBot123_bot`).  
+   - BotFather will return a token like:  
+     ```
+     1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
+     ```
+   - Save this value in the environment variable `TG_TOKEN`.
 
-Open Telegram and talk to @BotFather.
-
-Send /newbot → choose a name and unique username (e.g. TravelBot123_bot).
-
-BotFather will give you a token like:
-
-1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
-
-Save this as TG_TOKEN.
-
-2. Chat ID (TG_CHAT_ID)
-
-Add your bot to a group/channel.
-
-Send a test message.
-
-Open in browser:
-
-https://api.telegram.org/bot<TG_TOKEN>/getUpdates
-
-Look for "chat":{"id": ... } — that’s your TG_CHAT_ID.
-
-For groups it usually looks like -1001234567890.
+2. **Chat ID (`TG_CHAT_ID`)**  
+   You have two options:  
+   - **Quick method**: add a helper bot like [@userinfobot](https://t.me/userinfobot) to your group/channel.  
+     It will immediately reply with the `chat_id`.  
+   - **Official method**: add your bot, send a message in the group/channel and open:  
+     ```
+     https://api.telegram.org/bot<TG_TOKEN>/getUpdates
+     ```
+     In the JSON response, look for `"chat":{"id": ... }` → that’s your `TG_CHAT_ID`.  
+   - For groups it usually looks like `-1001234567890`.
 
 ---
 
