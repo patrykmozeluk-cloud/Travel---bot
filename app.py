@@ -39,7 +39,7 @@ DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1","true","True","yes","YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1","true","True","yes","YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
 
-# „uliczne” domyślne: nic nie musisz ustawiać
+# „uliczne” domyślne
 MAX_PER_DOMAIN = int(env("MAX_PER_DOMAIN", "5"))
 PER_HOST_CONCURRENCY = int(env("PER_HOST_CONCURRENCY", "2"))
 JITTER_MIN_MS = int(env("JITTER_MIN_MS", "120"))
@@ -59,8 +59,10 @@ DROP_PARAMS = {
 }
 
 def _strip_default_port(netloc: str, scheme: str) -> str:
-    if scheme == "http" and netloc.endswith(":80"):  return netloc[:-3]
-    if scheme == "https" and netloc.endswith(":443"): return netloc[:-4]
+    if scheme == "http" and netloc.endswith(":80"):
+        return netloc[:-3]
+    if scheme == "https" and netloc.endswith(":443"):
+        return netloc[:-4]
     return netloc
 
 def canonicalize_url(url: str) -> str:
@@ -69,16 +71,16 @@ def canonicalize_url(url: str) -> str:
         p = urlparse(u)
         scheme = (p.scheme or "https").lower()
         netloc = p.netloc.lower()
-        for pref in ("www.","m.","amp."):
+        for pref in ("www.", "m.", "amp."):
             if netloc.startswith(pref):
                 netloc = netloc[len(pref):]
         netloc = _strip_default_port(netloc, scheme)
         path = p.path or "/"
         while "//" in path:
-            path = path.replace("//","/")
+            path = path.replace("//", "/")
         if path != "/" and path.endswith("/"):
             path = path[:-1]
-        q = [(k,v) for k,v in parse_qsl(p.query, keep_blank_values=True)
+        q = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
              if k.lower() not in DROP_PARAMS]
         q.sort()
         return urlunparse((scheme, netloc, path, p.params, urlencode(q, doseq=True), ""))
@@ -140,16 +142,15 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
         "al": "en-US,en;q=0.9",
         "referer": "https://www.google.com/"
     },
-    # --- P I R A C I (już był hotfix) ---
+    # PIRACI (hotfix)
     "wakacyjnipiraci.pl": {
         "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
         "al": "pl-PL,pl;q=0.9,en-US;q=0.8",
         "referer": "https://wakacyjnipiraci.pl/",
-        # >>> HOTFIX tylko dla RSS <<<
         "rss_no_brotli": "1",
         "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
     },
-    # --- N O W E  H O S T Y  (ten sam hotfix tylko dla ich feedów) ---
+    # NOWE HOSTY (ten sam hotfix tylko dla ich feedów)
     "travelfree.info": {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "al": "en-US,en;q=0.9",
@@ -176,13 +177,16 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
 BASE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache", "Pragma": "no-cache", "DNT": "1",
-    "Upgrade-Insecure-Requests": "1", "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "DNT": "1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
 }
 
 def build_headers(url: str) -> Dict[str, str]:
     p = urlparse(url)
-    host = p.netloc.lower().replace("www.","")
+    host = p.netloc.lower().replace("www.", "")
     h = dict(BASE_HEADERS)
 
     # rozpoznaj feed po ścieżce/zapytaniu
@@ -194,13 +198,11 @@ def build_headers(url: str) -> Dict[str, str]:
         h["User-Agent"] = ident["ua"]
         h["Accept-Language"] = ident["al"]
         h["Referer"] = ident["referer"]
-
         # per-host fix tylko dla feedów na hostach z rss_no_brotli
         if is_rss and ident.get("rss_no_brotli") == "1":
             h["Accept-Encoding"] = "gzip, deflate"  # bez 'br'
             h["Accept"] = ident.get("rss_accept", h.get("Accept", "application/xml,*/*;q=0.7"))
     else:
-        # fallback – "ludzko"
         h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
         h["Accept-Language"] = "en-US,en;q=0.9"
         h["Referer"] = f"{p.scheme}://{p.netloc}/"
@@ -213,8 +215,12 @@ def domain_root(url: str) -> str:
 def make_async_client() -> httpx.AsyncClient:
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40)
     return httpx.AsyncClient(
-        headers=BASE_HEADERS, timeout=HTTP_TIMEOUT, follow_redirects=True,
-        http2=True, limits=limits, cookies=httpx.Cookies()
+        headers=BASE_HEADERS,
+        timeout=HTTP_TIMEOUT,
+        follow_redirects=True,
+        http2=True,
+        limits=limits,
+        cookies=httpx.Cookies()
     )
 
 # --- SOURCES ---
@@ -351,7 +357,7 @@ async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -
     r.raise_for_status()
     soup = BeautifulSoup(r.text, 'html.parser')
 
-    host = urlparse(url).netloc.lower().replace("www.","")
+    host = urlparse(url).netloc.lower().replace("www.", "")
     for sel in _selectors_for(host):
         for link_tag in soup.select(sel):
             href = link_tag.get('href')
@@ -359,7 +365,7 @@ async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -
                 continue
             title = (link_tag.get_text(strip=True) or "").strip()
             if not title:
-                parent = link_tag.find_parent(['h2','h3','article'])
+                parent = link_tag.find_parent(['h2', 'h3', 'article'])
                 if parent:
                     title = parent.get_text(strip=True) or "Brak tytułu"
             posts.append((title, href))
@@ -372,7 +378,7 @@ def _mobile_variant(url: str) -> str:
     p = urlparse(url)
     netloc = p.netloc
     if not netloc.startswith("m."):
-        netloc = "m." + netloc.replace("www.","")
+        netloc = "m." + netloc.replace("www.", "")
     return urlunparse((p.scheme, netloc, p.path or "/", p.params, p.query, p.fragment))
 
 def _amp_variant(url: str) -> str:
@@ -386,7 +392,7 @@ def _amp_variant(url: str) -> str:
     return urlunparse((p.scheme, p.netloc, path, p.params, p.query, p.fragment))
 
 async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
-    host = urlparse(url).netloc.lower().replace("www.","")
+    host = urlparse(url).netloc.lower().replace("www.", "")
     variants = [(url, "desktop")]
     # dopiero dla „trudnych” hostów próbujemy mobile/amp
     if host in {"travel-dealz.com", "secretflying.com", "theflightdeal.com"}:
@@ -455,11 +461,12 @@ async def process_feeds_async() -> str:
             candidates.append((title, link))
             sent_links_dict[canonical] = "processing"
 
+    # per-domain cap również na kandydatów
     per_host_count: Dict[str, int] = {}
     unique_candidates: List[Tuple[str, str]] = []
     for t, l in candidates:
         key = canonicalize_url(l)
-        host = urlparse(l).netloc.lower().replace("www.","")
+        host = urlparse(l).netloc.lower().replace("www.", "")
         if per_host_count.get(host, 0) >= MAX_PER_DOMAIN:
             continue
         if key in {canonicalize_url(x[1]) for x in unique_candidates}:
@@ -478,6 +485,7 @@ async def process_feeds_async() -> str:
                 sent_links_dict[canonicalize_url(l)] = now_utc_iso
                 sent_count += 1
 
+    # cleanup: 30 dni
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
     cleaned_sent_links = {
         link: ts for link, ts in sent_links_dict.items()
@@ -509,4 +517,4 @@ def handle_rss_task():
     log.info("Received /tasks/rss", extra={"event": "job_start", "ua": request.headers.get("User-Agent")})
     try:
         result = asyncio.run(process_feeds_async())
-       
+    
