@@ -355,7 +355,7 @@ async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -
     for sel in _selectors_for(host):
         for link_tag in soup.select(sel):
             href = link_tag.get('href')
-            if not href or not href.strip().startsWith("http"):
+            if not href or not href.strip().startswith("http"):
                 continue
             title = (link_tag.get_text(strip=True) or "").strip()
             if not title:
