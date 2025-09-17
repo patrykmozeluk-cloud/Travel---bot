@@ -504,9 +504,59 @@ async def process_feeds_async() -> str:
         try:
             dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except Exception:
-            # jeśli kiedyś zapisano coś dziwnego – zostaw, nie psuj
+            # jeśli zapisano nietypowy format – nie usuwaj
             cleaned_sent_links[link] = ts
             continue
         if dt > thirty_days_ago:
             cleaned_sent_links[link] = ts
-    state["s
+    state["sent_links"] = cleaned_sent_links
+
+    try:
+        save_state_atomic(state, generation)
+    except RuntimeError as e:
+        log.critical(f"State save failure: {e}")
+        return f"Critical: {e}"
+
+    result_msg = f"Done. Sent {sent_count} of {len(unique_candidates)} new posts."
+    log.info(result_msg)
+    return result_msg
+
+# --- ROUTES (SYNC!) ---
+@app.route("/")
+def index():
+    return "Travel-Bot vHYBRID — działa!", 200
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"status": "ok"}), 200
+
+@app.route("/run", methods=["GET"])
+def run_now():
+    try:
+        result = asyncio.run(process_feeds_async())
+        return jsonify({"status": "ok", "result": result}), 200
+    except Exception as e:
+        log.exception("run_now failed")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+@app.route("/tasks/rss", methods=['POST'])
+def handle_rss_task():
+    log.info("Received /tasks/rss", extra={"event": "job_start", "ua": request.headers.get("User-Agent")})
+    try:
+        result = asyncio.run(process_feeds_async())
+        return jsonify({"status": "ok", "result": result}), 200
+    except Exception as e:
+        log.exception("handle_rss_task failed")
+        return jsonify({"status": "error", "error": str(e)}), 500
+
+# Opcjonalny webhook Telegram
+if ENABLE_WEBHOOK:
+    @app.route("/telegram/webhook/<secret>", methods=["POST"])
+    def telegram_webhook(secret: str):
+        if not TELEGRAM_SECRET or secret != TELEGRAM_SECRET:
+            return jsonify({"status": "forbidden"}), 403
+        return jsonify({"status": "ok"}), 200
+
+# --- LOCAL MAIN ---
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "8080")))
