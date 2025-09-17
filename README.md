@@ -1,3 +1,4 @@
+
 # ✈️ Travel-Bot
 
 > 🇵🇱 **TL;DR (skrót)**  
@@ -64,6 +65,8 @@ export SENT_LINKS_FILE="sent_links.json"
 python app.py
 curl -X POST http://localhost:8080/tasks/rss
 
+---
+
 Deploy na Cloud Run
 
 Gen1 (First generation)
@@ -74,13 +77,14 @@ Timeout: 600 s
 
 Concurrency: 80
 
+
 Zmienne środowiskowe:
 
 TG_TOKEN, TG_CHAT_ID, BUCKET_NAME, SENT_LINKS_FILE
 
 opcjonalnie: HTTP_TIMEOUT=20.0, SEND_TIMEOUT_S=15, MAX_POSTS_PER_RUN=15
 
-
+---
 
 Cloud Scheduler
 
@@ -92,12 +96,9 @@ Headers: Content-Type: application/json
 
 Retry: max 5 prób, min backoff 30s, max backoff 10m, deadline 60s
 
-
-
 ---
 
 ⬆️ Back to top | 🇬🇧 English guide ↓
-
 
 ---
 
@@ -116,7 +117,7 @@ with link preview (sendMessage) if no thumbnail
 
 Deduplication: no duplicates across runs
 
-30-day cleanup of old entries in sent_links.json
+30-day cleanup — old entries removed from sent_links.json
 
 Stable timeouts, retries to Telegram, async fetching
 
@@ -134,8 +135,6 @@ BotFather will give you a token like:
 1234567890:ABCdefGhIJKlmNoPQRstuVWxyz
 
 Save this as TG_TOKEN.
-
-
 
 2. Chat ID (TG_CHAT_ID)
 
@@ -166,6 +165,8 @@ export SENT_LINKS_FILE="sent_links.json"
 python app.py
 curl -X POST http://localhost:8080/tasks/rss
 
+---
+
 Deploy on Cloud Run
 
 Gen1 (First generation)
@@ -176,12 +177,14 @@ Timeout: 600 s
 
 Concurrency: 80
 
+
 Env variables:
 
 TG_TOKEN, TG_CHAT_ID, BUCKET_NAME, SENT_LINKS_FILE
 
 optional: HTTP_TIMEOUT=20.0, SEND_TIMEOUT_S=15, MAX_POSTS_PER_RUN=15
 
+---
 
 Cloud Scheduler
 
@@ -197,14 +200,15 @@ Retry: max 5 attempts, min backoff 30s, max backoff 10m, deadline 60s
 
 ⬆️ Back to top | 🇵🇱 Instrukcja PL ↑
 
-
 ---
 
-⚠️ Known issues / Typowe błędy w logach
+⚠️ Typowe błędy w logach / Known issues
 
-send failed for <URL>:
+🇵🇱 Typowe błędy w logach
+
+send failed for <URL>
 ↳ najczęściej timeout podczas wysyłki do Telegrama.
-Normalne, link spróbuje się wysłać ponownie w następnym cyklu.
+Normalne: link spróbuje się wysłać ponownie w następnym cyklu.
 Można zwiększyć SEND_TIMEOUT_S do 15 s.
 
 503 + długi latency w logach Cloud Run
@@ -221,6 +225,27 @@ Bot wtedy wyśle zwykły link z podglądem strony.
 
 ---
 
+🇬🇧 Common errors in logs
+
+send failed for <URL>
+↳ usually a timeout when sending to Telegram.
+Normal: the link will be retried in the next cycle.
+You can increase SEND_TIMEOUT_S to 15 s.
+
+503 + high latency in Cloud Run logs
+↳ cold start or slow response from source website.
+Scheduler will retry automatically.
+
+Telegram returned ok=false
+↳ usually missing permissions for the bot in the group/channel.
+Check if the bot can post messages.
+
+No thumbnails for some links
+↳ site doesn’t expose og:image/twitter:image or image is too large.
+Bot falls back to sending plain link with preview.
+
+---
+
 📂 Repo layout
 
 .github/workflows/cron.yml   # optional GitHub Actions scheduler
@@ -230,12 +255,15 @@ requirements.txt
 rss_sources.txt
 web_sources.txt
 
+---
+
 🔒 Security
 
 Keep TG_TOKEN in environment variables/secrets
 
 Optional: protect /tasks/rss with header X-Task-Secret
 
+---
 
 📜 License
 
