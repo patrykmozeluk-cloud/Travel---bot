@@ -140,14 +140,37 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
         "al": "en-US,en;q=0.9",
         "referer": "https://www.google.com/"
     },
+    # --- P I R A C I (już był hotfix) ---
     "wakacyjnipiraci.pl": {
         "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
         "al": "pl-PL,pl;q=0.9,en-US;q=0.8",
         "referer": "https://wakacyjnipiraci.pl/",
-        # --- HOTFIX tylko dla RSS na tym hostcie ---
+        # >>> HOTFIX tylko dla RSS <<<
         "rss_no_brotli": "1",
         "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
-    }
+    },
+    # --- N O W E  H O S T Y  (ten sam hotfix tylko dla ich feedów) ---
+    "travelfree.info": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "en-US,en;q=0.9",
+        "referer": "https://travelfree.info/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+    },
+    "twomonkeystravelgroup.com": {
+        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "en-US,en;q=0.9",
+        "referer": "https://twomonkeystravelgroup.com/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+    },
+    "thebarefootnomad.com": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "en-US,en;q=0.9",
+        "referer": "https://www.thebarefootnomad.com/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+    },
 }
 
 BASE_HEADERS = {
@@ -172,12 +195,12 @@ def build_headers(url: str) -> Dict[str, str]:
         h["Accept-Language"] = ident["al"]
         h["Referer"] = ident["referer"]
 
-        # per-host fix tylko dla RSS na wakacyjnipiraci.pl
+        # per-host fix tylko dla feedów na hostach z rss_no_brotli
         if is_rss and ident.get("rss_no_brotli") == "1":
             h["Accept-Encoding"] = "gzip, deflate"  # bez 'br'
             h["Accept"] = ident.get("rss_accept", h.get("Accept", "application/xml,*/*;q=0.7"))
     else:
-        # fallback – ale też "ludzko"
+        # fallback – "ludzko"
         h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
         h["Accept-Language"] = "en-US,en;q=0.9"
         h["Referer"] = f"{p.scheme}://{p.netloc}/"
@@ -332,9 +355,8 @@ async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -
     for sel in _selectors_for(host):
         for link_tag in soup.select(sel):
             href = link_tag.get('href')
-            if not href or not href.strip().startswith("http"):
+            if not href or not href.strip().startsWith("http"):
                 continue
-            # tytuł
             title = (link_tag.get_text(strip=True) or "").strip()
             if not title:
                 parent = link_tag.find_parent(['h2','h3','article'])
@@ -375,7 +397,6 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
             posts = await _scrape_once(client, vurl, note)
             if posts:
                 log.info(f"Scraped {len(posts)} posts from Web ({note}): {url}")
-                # cap per domena
                 return posts[:MAX_PER_DOMAIN]
         except Exception as e:
             dbg(f"scrape variant {note} failed for {url}: {e}")
@@ -414,7 +435,6 @@ async def process_feeds_async() -> str:
         for url in sources:
             is_rss = any(tok in url for tok in ["rss", "feed", ".xml"])
             if is_rss and url in web:
-                # zabezpieczenie: jeśli przez przypadek trafiło do WEB z "feed", i tak wymuś RSS
                 pass
             if is_rss:
                 tasks.append(fetch_feed(client, url))
@@ -435,7 +455,6 @@ async def process_feeds_async() -> str:
             candidates.append((title, link))
             sent_links_dict[canonical] = "processing"
 
-    # per-domain cap również na kandydatów (by nie zalać TG z jednej domeny)
     per_host_count: Dict[str, int] = {}
     unique_candidates: List[Tuple[str, str]] = []
     for t, l in candidates:
@@ -459,7 +478,6 @@ async def process_feeds_async() -> str:
                 sent_links_dict[canonicalize_url(l)] = now_utc_iso
                 sent_count += 1
 
-    # cleanup: 30 dni
     thirty_days_ago = datetime.now(timezone.utc) - timedelta(days=30)
     cleaned_sent_links = {
         link: ts for link, ts in sent_links_dict.items()
@@ -491,12 +509,4 @@ def handle_rss_task():
     log.info("Received /tasks/rss", extra={"event": "job_start", "ua": request.headers.get("User-Agent")})
     try:
         result = asyncio.run(process_feeds_async())
-        code = 200 if "Critical" not in result else 500
-        return result, code
-    except Exception as e:
-        log.exception("Unhandled error in /tasks/rss")
-        return f"Server error: {e}", 500
-
-if __name__ == "__main__":
-    port = int(env("PORT", "8080"))
-    app.run(host="0.0.0.0", port=port, debug=False)
+       
