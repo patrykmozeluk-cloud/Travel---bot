@@ -1,17 +1,28 @@
+# Travel-Dealz (fallback strona główna)
 https://travel-dealz.com/
+
+# Secret Flying
 https://www.secretflying.com/
-https://twomonkeystravelgroup.com
+
+# Two Monkeys (blog główny)
+https://twomonkeystravelgroup.com/
+# + sekcja z promocjami
+https://twomonkeystravelgroup.com/category/travel-deals/
+
+# Wakacyjni Piraci
 https://www.wakacyjnipiraci.pl/
+
+# MarocMama (fallback strona główna)
 https://marocmama.com/
+
+# Barefoot Nomad
 https://www.thebarefootnomad.com/posts/
-https://loter.pl/waszyngton 
+
+# Loter (różne sekcje tematyczne)
+https://loter.pl/waszyngton
 https://loter.pl/usa
 https://loter.pl/afryka
 https://loter.pl/azja
-https://loter.pl/europa 
+https://loter.pl/europa
 https://loter.pl/miami
-https://loter.pl/usa
-https://loter.pl/afryka
-https://loter.pl/azja
-https://loter.pl/Japonia 
-https://loter.pl/
+https://loter.pl/japonia
