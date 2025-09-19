@@ -40,7 +40,7 @@ DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1","true","True","yes","YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1","true","True","yes","YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = brak limitu
 
-# --- Telegram rate-limit (bez env, stałe, minimalna ingerencja) ---
+# --- Telegram rate-limit (bez env, stałe) ---
 TG_RATE_INTERVAL = 1.1  # sekundy między wiadomościami do tego samego czatu
 _tg_last_send_ts: float | None = None
 _tg_send_lock = asyncio.Lock()
@@ -56,8 +56,13 @@ async def _tg_throttle():
         _tg_last_send_ts = time.monotonic()
 
 # TTL
-DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))
-DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "24"))
+DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))  # auto-delete TG wiadomości
+DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "336"))       # zalecane 14 dni = 336h
+
+# świeżość po dacie publikacji (event-time)
+USE_EVENT_TIME = env("USE_EVENT_TIME", "1") in {"1","true","True","yes","YES"}
+EVENT_WINDOW_HOURS = int(env("EVENT_WINDOW_HOURS", "48"))
+BACKFILL_WARMUP_HOURS = int(env("BACKFILL_WARMUP_HOURS", "6"))
 
 # limity
 MAX_PER_DOMAIN = int(env("MAX_PER_DOMAIN", "5"))
@@ -65,7 +70,7 @@ PER_HOST_CONCURRENCY = int(env("PER_HOST_CONCURRENCY", "2"))
 JITTER_MIN_MS = int(env("JITTER_MIN_MS", "120"))
 JITTER_MAX_MS = int(env("JITTER_MAX_MS", "400"))
 
-# wrażliwe domeny: tytuł bez dodatków
+# wrażliwe domeny: tytuł bez dodatków (rezerwowe)
 TITLE_ONLY_DOMAINS = {"secretflying.com", "wakacyjnipiraci.pl"}
 
 def dbg(msg: str):
@@ -152,6 +157,28 @@ def save_state_atomic(state: Dict[str, Any], expected_generation: int | None, re
                 continue
             raise
     raise RuntimeError("Atomic save failed.")
+
+def prune_sent_links(state: Dict[str, Any], now: datetime) -> int:
+    """Usuwa wpisy z sent_links starsze niż DEDUP_TTL_HOURS."""
+    ttl = timedelta(hours=DEDUP_TTL_HOURS)
+    sent = state.get("sent_links", {})
+    if not isinstance(sent, dict) or not sent:
+        return 0
+    removed = 0
+    keep: Dict[str, str] = {}
+    for link, iso in sent.items():
+        try:
+            ts = datetime.fromisoformat(iso)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+        except Exception:
+            continue
+        if now - ts <= ttl:
+            keep[link] = iso
+        else:
+            removed += 1
+    state["sent_links"] = keep
+    return removed
 
 # ---------- HEADERS / CLIENT ----------
 STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
@@ -380,8 +407,45 @@ async def sweep_delete_queue(now: datetime | None = None) -> int:
     return deleted
 
 # ---------- FETCH & SCRAPE ----------
-async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
-    posts: List[Tuple[str, str]] = []
+
+def _parse_entry_datetime(entry) -> datetime | None:
+    """
+    Zwraca datetime (UTC) z entry: preferuje published → updated → None.
+    Obsługuje feedparser (published_parsed/updated_parsed) i ISO/RFC2822 w stringach.
+    """
+    from email.utils import parsedate_to_datetime
+
+    for key in ("published_parsed", "updated_parsed", "created_parsed"):
+        ts = entry.get(key)
+        if ts:
+            try:
+                dt = datetime(*ts[:6], tzinfo=timezone.utc)
+                return dt.astimezone(timezone.utc)
+            except Exception:
+                pass
+
+    for key in ("published", "updated", "created"):
+        s = entry.get(key)
+        if not s:
+            continue
+        try:
+            dt = parsedate_to_datetime(str(s))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+        try:
+            dt = datetime.fromisoformat(str(s).replace("Z", "+00:00"))
+            if dt.tzinfo is None:
+                dt = dt.replace(tzinfo=timezone.utc)
+            return dt.astimezone(timezone.utc)
+        except Exception:
+            pass
+    return None
+
+async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
+    posts: List[Tuple[str, str, datetime | None]] = []
     try:
         async with _sem_for(url):
             await _jitter()
@@ -392,7 +456,6 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             feed = feedparser.parse(r.content)
             if getattr(feed, "bozo", 0):
                 log.info(f"feedparser bozo for {url}: {getattr(feed, 'bozo_exception', '')}")
-            # --- PODMIENIONA PĘTLA: obsługa id/guid i względnych URL-i ---
             for entry in feed.entries:
                 t = entry.get("title")
                 raw_link = entry.get("link") or entry.get("id") or entry.get("guid")
@@ -407,20 +470,23 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
                         l = raw_link
                 except Exception:
                     continue
-                posts.append((t, l))
+                dt = _parse_entry_datetime(entry)
+                posts.append((t, l, dt))
             log.info(f"Fetched {len(posts)} posts from RSS: {url}")
             host = urlparse(url).netloc.lower().replace("www.", "")
             if not posts and "marocmama.com" in host:
                 dbg("marocmama RSS empty — attempting homepage fallback")
-                posts = await marocmama_fallback(client, domain_root(url))
-            return posts[:MAX_PER_DOMAIN]
+                mm = await marocmama_fallback(client, domain_root(url))
+                posts = [(t, l, None) for (t, l) in mm]
+            return posts
         log.info(f"HTTP {r.status_code} for RSS: {url}")
     except Exception as e:
         log.info(f"Error fetching RSS {url}: {e}")
         try:
             host = urlparse(url).netloc.lower()
             if "marocmama.com" in host:
-                return (await marocmama_fallback(client, domain_root(url)))[:MAX_PER_DOMAIN]
+                mm = await marocmama_fallback(client, domain_root(url))
+                return [(t, l, None) for (t, l) in mm]
         except Exception:
             pass
     return []
@@ -441,8 +507,8 @@ def _selectors_for(host: str) -> List[str]:
             out.append(s); seen.add(s)
     return out
 
-async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -> List[Tuple[str, str]]:
-    posts: List[Tuple[str, str]] = []
+async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -> List[Tuple[str, str, datetime | None]]:
+    posts: List[Tuple[str, str, datetime | None]] = []
     async with _sem_for(url):
         await _jitter()
         r = await client.get(url, headers=build_headers(url))
@@ -459,13 +525,13 @@ async def _scrape_once(client: httpx.AsyncClient, url: str, variant_note: str) -
                 parent = link_tag.find_parent(["h2", "h3", "article"])
                 if parent:
                     title = parent.get_text(strip=True) or "Brak tytułu"
-            posts.append((title, href))
+            posts.append((title, href, None))
         if posts:
             dbg(f"{host} matched selector '{sel}' ({variant_note}), count={len(posts)}")
             break
     return posts
 
-async def _try_variants_scrape(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
+async def _try_variants_scrape(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
     def _mobile_variant(u: str) -> str:
         p = urlparse(u)
         netloc = p.netloc
@@ -490,7 +556,7 @@ async def _try_variants_scrape(client: httpx.AsyncClient, url: str) -> List[Tupl
             posts = await _scrape_once(client, vurl, note)
             if posts:
                 log.info(f"Scraped {len(posts)} posts from Web ({note}): {url}")
-                return posts[:MAX_PER_DOMAIN]
+                return posts
         except Exception as e:
             dbg(f"scrape variant {note} failed for {url}: {e}")
             continue
@@ -516,12 +582,12 @@ async def marocmama_fallback(client: httpx.AsyncClient, root_url: str) -> List[T
                 break
         if posts:
             log.info(f"marocmama fallback returned {len(posts)} items")
-        return posts[:MAX_PER_DOMAIN]
+        return posts
     except Exception as e:
         log.info(f"marocmama fallback failed: {e}")
         return []
 
-async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
+async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
     return await _try_variants_scrape(client, url)
 
 # ---------- MAIN FLOW ----------
@@ -547,9 +613,18 @@ async def process_feeds_async() -> str:
         return "No sources found."
 
     state, generation = load_state()
+    _ensure_state_shapes(state)
     sent_links_dict: Dict[str, str] = state.get("sent_links", {})
 
-    all_posts: List[Tuple[str, str]] = []
+    # Prune dedup wg TTL
+    now = datetime.now(timezone.utc)
+    pruned = prune_sent_links(state, now)
+
+    # Czy to „czysty start”?
+    is_cold_start = (len(sent_links_dict) == 0)
+
+    # Zbiór wpisów: (title, link, dt)
+    collected: List[Tuple[str, str, datetime | None]] = []
     async with make_async_client() as client:
         tasks: List[asyncio.Future] = []
         for url in sources:
@@ -572,41 +647,72 @@ async def process_feeds_async() -> str:
             log.info(f"Task error: {res}")
             continue
         if res:
-            all_posts.extend(res)
+            collected.extend(res)
 
-    # kanonizacja + dedup + limit per domenę
-    per_host_count: Dict[str, int] = {}
-    unique: List[Tuple[str, str]] = []
+    # Kanonizacja, dedup w locie
+    items: List[Tuple[str, str, datetime | None]] = []
     seen = set()
-    for title, link in all_posts:
+    for title, link, dt in collected:
         canon = canonicalize_url(link)
         if not canon:
             continue
         if not DISABLE_DEDUP and canon in sent_links_dict:
             continue
-        host = urlparse(canon).netloc.lower().replace("www.", "")
-        if per_host_count.get(host, 0) >= MAX_PER_DOMAIN:
-            continue
         if canon in seen:
             continue
         seen.add(canon)
+        items.append((title or "Nowy wpis", canon, dt))
+
+    # Event-time okno świeżości i sortowanie
+    if USE_EVENT_TIME:
+        window = timedelta(hours=EVENT_WINDOW_HOURS)
+        if is_cold_start and BACKFILL_WARMUP_HOURS > 0:
+            window = timedelta(hours=BACKFILL_WARMUP_HOURS)
+
+        cutoff = now - window
+        fresh: List[Tuple[str, str, datetime | None]] = []
+        for t, l, dt in items:
+            if dt is None or dt >= cutoff:
+                fresh.append((t, l, dt))
+        items = fresh
+
+        # Sort malejąco po dacie; None ląduje na końcu
+        items.sort(
+            key=lambda x: (
+                x[2] is None,
+                x[2] if x[2] else datetime.min.replace(tzinfo=timezone.utc)
+            ),
+            reverse=True
+        )
+
+    # Jedno cięcie limitów: per domena → globalny limit
+    per_host_count: Dict[str, int] = {}
+    unique_limited: List[Tuple[str, str]] = []
+    for title, canon_link, _dt in items:
+        host = urlparse(canon_link).netloc.lower().replace("www.", "")
+        if per_host_count.get(host, 0) >= MAX_PER_DOMAIN:
+            continue
         per_host_count[host] = per_host_count.get(host, 0) + 1
-        unique.append((title or "Nowy wpis", canon))
+        unique_limited.append((title, canon_link))
 
     if MAX_POSTS_PER_RUN > 0:
-        unique = unique[:MAX_POSTS_PER_RUN]
+        unique_limited = unique_limited[:MAX_POSTS_PER_RUN]
 
+    # Wysyłka
     sent = 0
-    now_iso = datetime.now(timezone.utc).isoformat()
-    for title, canon_link in unique:
+    now_iso = now.isoformat()
+    for title, canon_link in unique_limited:
         if await send_telegram_message_async(title, canon_link, TG_CHAT_ID):
             sent_links_dict[canon_link] = now_iso
             sent += 1
 
+    # Zapis stanu (z już przyciętym dedup)
     state["sent_links"] = sent_links_dict
     save_state_atomic(state, generation)
 
-    return f"Processed sources={len(sources)}, posts_in={len(all_posts)}, sent={sent}, kept_in_state={len(sent_links_dict)}"
+    return (f"Processed sources={len(sources)}, "
+            f"items_in={len(collected)}, candidates={len(items)}, "
+            f"sent={sent}, pruned={pruned}, kept_in_state={len(sent_links_dict)}")
 
 # ---------- ROUTES ----------
 @app.get("/")
@@ -626,7 +732,6 @@ def run_now():
 @app.get("/tasks/rss")
 @app.post("/tasks/rss")
 def tasks_rss():
-    # dokładnie ta sama ścieżka wykonania co /run
     result = asyncio.run(process_feeds_async())
     return jsonify({"status": "done", "result": result})
 
