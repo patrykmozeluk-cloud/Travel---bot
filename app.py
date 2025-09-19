@@ -5,7 +5,7 @@ import time
 import random
 from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
-from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
+from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote, urljoin
 
 import httpx
 import feedparser
@@ -54,7 +54,7 @@ async def _tg_throttle():
             if wait > 0:
                 await asyncio.sleep(wait)
         _tg_last_send_ts = time.monotonic()
-        
+
 # TTL
 DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))
 DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "24"))
@@ -172,7 +172,7 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
     },
     "wakacyjnipiraci.pl": {
         "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
-        "al": "pl-PL,pl;q=0.9,en-US;q=0.8",
+        "al": "pl-PL,pl;q=0.9,en-US,en;q=0.8",
         "referer": "https://wakacyjnipiraci.pl/",
         "rss_no_brotli": "1",
         "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
@@ -392,11 +392,22 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
             feed = feedparser.parse(r.content)
             if getattr(feed, "bozo", 0):
                 log.info(f"feedparser bozo for {url}: {getattr(feed, 'bozo_exception', '')}")
+            # --- PODMIENIONA PĘTLA: obsługa id/guid i względnych URL-i ---
             for entry in feed.entries:
                 t = entry.get("title")
-                l = entry.get("link")
-                if t and l:
-                    posts.append((t, l))
+                raw_link = entry.get("link") or entry.get("id") or entry.get("guid")
+                if not t or not raw_link:
+                    continue
+                try:
+                    raw_link = str(raw_link)
+                    if not raw_link.startswith("http"):
+                        base = f"{urlparse(url).scheme}://{urlparse(url).netloc}/"
+                        l = urljoin(base, raw_link.lstrip("/"))
+                    else:
+                        l = raw_link
+                except Exception:
+                    continue
+                posts.append((t, l))
             log.info(f"Fetched {len(posts)} posts from RSS: {url}")
             host = urlparse(url).netloc.lower().replace("www.", "")
             if not posts and "marocmama.com" in host:
@@ -611,12 +622,14 @@ def healthz():
 def run_now():
     result = asyncio.run(process_feeds_async())
     return jsonify({"status": "done", "result": result})
+
 @app.get("/tasks/rss")
 @app.post("/tasks/rss")
 def tasks_rss():
     # dokładnie ta sama ścieżka wykonania co /run
     result = asyncio.run(process_feeds_async())
     return jsonify({"status": "done", "result": result})
+
 @app.post("/telegram/webhook")
 def telegram_webhook():
     if not ENABLE_WEBHOOK:
