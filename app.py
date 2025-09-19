@@ -281,22 +281,42 @@ async def send_telegram_message_async(title: str, link: str, chat_id: str | None
 
     safe_title = html_mod.escape(title or "", quote=False)
     text = f"<b>{safe_title}</b>\n\n{link}"
-
     payload = {"chat_id": str(chat), "text": text, "parse_mode": "HTML", "disable_web_page_preview": False}
 
     try:
         async with make_async_client() as client:
             url = f"https://api.telegram.org/bot{TG_TOKEN}/sendMessage"
+
+            # throttling – żeby nie wpaść w 429
+            await _tg_throttle()
+
             r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+
+            # retry przy 429 Too Many Requests (max 3)
+            for attempt in range(3):
+                if r.status_code != 429:
+                    break
+                retry_after = 0.0
+                try:
+                    retry_after = float(r.headers.get("Retry-After", "1"))
+                except Exception:
+                    retry_after = 1.0
+                log.info(f"Telegram 429: retry in {retry_after}s (attempt {attempt+1}/3)")
+                await asyncio.sleep(retry_after + 0.2)
+                await _tg_throttle()
+                r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+
             r.raise_for_status()
             body = r.json()
             if not body.get("ok"):
                 log.error(f"Telegram ok=false: {body}")
                 return False
+
             mid = body.get("result", {}).get("message_id")
             if mid:
                 delete_at = datetime.now(timezone.utc) + timedelta(hours=DELETE_AFTER_HOURS)
                 remember_for_deletion(str(chat), int(mid), delete_at)
+
             log.info(f"Message sent: {title[:80]}… (preview_by_TG=True)")
             return True
     except Exception as e:
