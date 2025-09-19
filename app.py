@@ -139,8 +139,11 @@ def prune_sent_links(state: Dict[str, Any], now: datetime) -> int:
 BASE_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
     "Accept-Encoding": "gzip, deflate, br",
-    "Cache-Control": "no-cache", "Pragma": "no-cache",
-    "DNT": "1", "Upgrade-Insecure-Requests": "1", "Connection": "keep-alive",
+    "Cache-Control": "no-cache",
+    "Pragma": "no-cache",
+    "DNT": "1",
+    "Upgrade-Insecure-Requests": "1",
+    "Connection": "keep-alive",
 }
 
 # HOTFIXY (przywrócone, w tym Tanie-Loty)
@@ -198,10 +201,13 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
 }
 
 def build_headers(url: str) -> Dict[str, str]:
-    p = urlparse(url); host = p.netloc.lower().replace("www.","")
+    p = urlparse(url)
+    host = p.netloc.lower().replace("www.", "")
     h = dict(BASE_HEADERS)
+
     pathq = (p.path or "") + ("?" + p.query if p.query else "")
-    is_rss = any(tok in pathq.lower() for tok in ("/feed","rss",".xml","?feed"))
+    is_rss = any(tok in pathq.lower() for tok in ("/feed", "rss", ".xml", "?feed"))
+
     ident = STICKY_IDENTITY.get(host)
     if ident:
         h["User-Agent"] = ident["ua"]
@@ -209,17 +215,22 @@ def build_headers(url: str) -> Dict[str, str]:
         h["Referer"] = ident["referer"]
         if is_rss and ident.get("rss_no_brotli") == "1":
             h["Accept-Encoding"] = "gzip, deflate"
-            h["Accept"] = ident.get("rss_accept", h.get("Accept","application/xml,*/*;q=0.7"))
+            h["Accept"] = ident.get("rss_accept", h.get("Accept", "application/xml,*/*;q=0.7"))
     else:
-        h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+        h["User-Agent"] = (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
+        )
         h["Accept-Language"] = "en-US,en;q=0.9"
         h["Referer"] = f"{p.scheme}://{p.netloc}/"
 
-    # Dodatkowe wzmocnienie dla RSS bez profilu:
+    # Wymuszenie „RSS-owego” Accept + wyłączenie brotli dla feedów bez profilu
     if is_rss and not ident:
         h["Accept"] = "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
         h["Accept-Encoding"] = "gzip, deflate"
+
     return h
+
 
 def make_async_client() -> httpx.AsyncClient:
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40)
