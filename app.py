@@ -56,8 +56,8 @@ async def _tg_throttle():
         _tg_last_send_ts = time.monotonic()
         
 # TTL
-DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))
-DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "24"))
+DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "48"))
+DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "336"))
 
 # limity
 MAX_PER_DOMAIN = int(env("MAX_PER_DOMAIN", "5"))
