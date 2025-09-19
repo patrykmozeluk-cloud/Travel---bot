@@ -146,7 +146,7 @@ BASE_HEADERS = {
     "Connection": "keep-alive",
 }
 
-# HOTFIXY (przywrócone, w tym Tanie-Loty)
+# HOTFIXY (przywrócone, w tym kilka popularnych domen)
 STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
     "tanie-loty.com.pl": {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
@@ -200,37 +200,70 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
     },
 }
 
+# rozszerzenia profili (bez ruszania powyższego słownika)
+STICKY_IDENTITY.update({
+    "fly4free.pl": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "pl-PL,pl;q=0.9,en-US,en;q=0.8",
+        "referer": "https://www.fly4free.pl/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    },
+    "fly4free.com": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "en-US,en;q=0.9",
+        "referer": "https://www.fly4free.com/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    },
+    "loter.pl": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "pl-PL,pl;q=0.9,en-US,en;q=0.8",
+        "referer": "https://loter.pl/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    },
+    "holidaypirates.com": {
+        "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
+        "al": "en-US,en;q=0.9",
+        "referer": "https://www.holidaypirates.com/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    },
+    "mlecznepodroze.pl": {
+        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
+        "al": "pl-PL,pl;q=0.9,en-US,en;q=0.8",
+        "referer": "https://www.mlecznepodroze.pl/",
+        "rss_no_brotli": "1",
+        "rss_accept": "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
+    },
+})
+
 def build_headers(url: str) -> Dict[str, str]:
     p = urlparse(url)
     host = p.netloc.lower().replace("www.", "")
     h = dict(BASE_HEADERS)
-
     pathq = (p.path or "") + ("?" + p.query if p.query else "")
-    is_rss = any(tok in pathq.lower() for tok in ("/feed", "rss", ".xml", "?feed"))
-
+    is_rssish = any(tok in pathq.lower() for tok in ("/feed","rss",".xml","?feed"))
     ident = STICKY_IDENTITY.get(host)
+
     if ident:
         h["User-Agent"] = ident["ua"]
         h["Accept-Language"] = ident["al"]
         h["Referer"] = ident["referer"]
-        if is_rss and ident.get("rss_no_brotli") == "1":
+        if is_rssish and ident.get("rss_no_brotli") == "1":
             h["Accept-Encoding"] = "gzip, deflate"
-            h["Accept"] = ident.get("rss_accept", h.get("Accept", "application/xml,*/*;q=0.7"))
+            h["Accept"] = ident.get("rss_accept", h.get("Accept","application/xml,*/*;q=0.7"))
     else:
-        h["User-Agent"] = (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
-        )
+        h["User-Agent"] = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                           "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36")
         h["Accept-Language"] = "en-US,en;q=0.9"
         h["Referer"] = f"{p.scheme}://{p.netloc}/"
 
-    # Wymuszenie „RSS-owego” Accept + wyłączenie brotli dla feedów bez profilu
-    if is_rss and not ident:
-        h["Accept"] = "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+    if is_rssish and not ident:
+        h["Accept"] = "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
         h["Accept-Encoding"] = "gzip, deflate"
-
     return h
-
 
 def make_async_client() -> httpx.AsyncClient:
     limits = httpx.Limits(max_keepalive_connections=20, max_connections=40)
@@ -272,7 +305,11 @@ async def _tg_throttle():
 
 def remember_for_deletion(chat_id: str, message_id: int, delete_at: datetime) -> None:
     state, gen = load_state(); _ensure_state_shapes(state)
-    state["delete_queue"].append({"chat_id": str(chat_id), "message_id": int(message_id), "delete_at": delete_at.isoformat()})
+    state["delete_queue"].append({
+        "chat_id": str(chat_id),
+        "message_id": int(message_id),
+        "delete_at": delete_at.isoformat()
+    })
     save_state_atomic(state, gen)
 
 async def send_telegram_message_async(title: str, link: str, chat_id: str | None = None) -> bool:
@@ -292,7 +329,8 @@ async def send_telegram_message_async(title: str, link: str, chat_id: str | None
             await _tg_throttle()
             r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
             for _ in range(3):
-                if r.status_code != 429: break
+                if r.status_code != 429:
+                    break
                 ra = float(r.headers.get("Retry-After","1"))
                 log.info(f"Telegram 429: retry in {ra}s")
                 await asyncio.sleep(ra + 0.2)
@@ -314,10 +352,12 @@ async def send_telegram_message_async(title: str, link: str, chat_id: str | None
 
 async def sweep_delete_queue(now: datetime | None = None) -> int:
     if not TG_TOKEN or not TG_CHAT_ID: return 0
-    state, gen = load_state(); _ensure_state_shapes(state); dq = state.get("delete_queue", [])
+    state, gen = load_state(); _ensure_state_shapes(state)
+    dq = state.get("delete_queue", [])
     if not dq: return 0
     now = now or _now_utc()
-    keep: List[Dict[str, Any]] = []; deleted = 0
+    keep: List[Dict[str, Any]] = []
+    deleted = 0
     async with make_async_client() as client:
         for item in dq:
             try:
@@ -326,30 +366,38 @@ async def sweep_delete_queue(now: datetime | None = None) -> int:
             except Exception:
                 continue
             if delete_at > now:
-                keep.append(item); continue
+                keep.append(item)
+                continue
             try:
                 r = await client.post(
                     f"https://api.telegram.org/bot{TG_TOKEN}/deleteMessage",
                     json={"chat_id": item["chat_id"], "message_id": item["message_id"]},
                     timeout=HTTP_TIMEOUT
                 )
-                if r.status_code == 200: deleted += 1
-                else: dbg(f"deleteMessage status={r.status_code} body={r.text[:200]}")
+                if r.status_code == 200:
+                    deleted += 1
+                else:
+                    dbg(f"deleteMessage status={r.status_code} body={r.text[:200]}")
             except Exception as e:
                 dbg(f"deleteMessage error: {e}")
-    state["delete_queue"] = keep; save_state_atomic(state, gen); return deleted
+    state["delete_queue"] = keep
+    save_state_atomic(state, gen)
+    return deleted
 
-# ---------- FETCH & SCRAPE ----------
+# ---------- FETCH & SCRAPE (oryginalne + rozszerzenia) ----------
 def _parse_entry_datetime(entry) -> datetime | None:
     from email.utils import parsedate_to_datetime
     for k in ("published_parsed","updated_parsed","created_parsed"):
         ts = entry.get(k)
         if ts:
-            try: return datetime(*ts[:6], tzinfo=timezone.utc)
-            except Exception: pass
+            try:
+                return datetime(*ts[:6], tzinfo=timezone.utc)
+            except Exception:
+                pass
     for k in ("published","updated","created"):
         s = entry.get(k)
-        if not s: continue
+        if not s:
+            continue
         try:
             dt = parsedate_to_datetime(str(s))
             if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
@@ -364,40 +412,21 @@ def _parse_entry_datetime(entry) -> datetime | None:
             pass
     return None
 
-async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
-    posts: List[Tuple[str, str, datetime | None]] = []
-    try:
-        async with _sem_for(url):
-            await _jitter()
-            r = await client.get(url, headers=build_headers(url))
-        if r.status_code == 200 and r.content[:64].lstrip().lower().startswith(b"<html"):
-            log.info(f"RSS looks like HTML (not XML): {url} [CT={r.headers.get('Content-Type')}]")
-        if r.status_code == 200:
-            feed = feedparser.parse(r.content)
-            if getattr(feed,"bozo",0):
-                dbg(f"feedparser bozo for {url}: {getattr(feed,'bozo_exception','')}")
-            for e in feed.entries:
-                t = e.get("title"); raw = e.get("link") or e.get("id") or e.get("guid")
-                if not t or not raw: continue
-                try:
-                    raw = str(raw)
-                    l = raw if raw.startswith("http") else urljoin(f"{urlparse(url).scheme}://{urlparse(url).netloc}/", raw.lstrip("/"))
-                except Exception:
-                    continue
-                posts.append((t, l, _parse_entry_datetime(e)))
-            log.info(f"Fetched {len(posts)} posts from RSS: {url}")
-            return posts
-        log.info(f"HTTP {r.status_code} for RSS: {url}")
-    except Exception as e:
-        log.info(f"Error fetching RSS {url}: {e}")
-    return []
-
+# Oryginalny scraping (z poszerzonymi selektorami)
 def _selectors_for(host: str) -> List[str]:
     base: Dict[str, List[str]] = {
         "travel-dealz.com": ['article.article-item h2 a','article.article h2 a'],
         "secretflying.com": ['article.post-item .post-title a','article h2 a'],
         "wakacyjnipiraci.pl": ['article.post-list__item a.post-list__link'],
         "theflightdeal.com": ['article h2 a','.entry-title a'],
+
+        # dodatkowe
+        "fly4free.pl": ['article h2 a','.title a','.post-title a'],
+        "fly4free.com": ['article h2 a','.title a','.post-title a'],
+        "loter.pl": ['article h2 a','.entry-title a','h2.entry-title a'],
+        "tanie-loty.com.pl": ['article h2 a','.entry-title a','h2.entry-title a'],
+        "mlecznepodroze.pl": ['article h2 a','.entry-title a','h2.entry-title a'],
+        "holidaypirates.com": ['article h2 a','.post-card__title a','.entry-title a'],
     }
     return base.get(host, []) + ['article h2 a','article h3 a','h2 a','h3 a','main a']
 
@@ -421,6 +450,163 @@ async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str,
     log.info(f"Scraped {len(posts)} posts from Web: {url}")
     return posts
 
+# Profile nagłówków + discovery + JSON Feed (DODANE)
+ACCEPT_RSS_DEFAULT = "application/rss+xml, application/atom+xml;q=0.95, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+
+HEADER_PROFILES = [
+    lambda url: {**build_headers(url), "Accept": ACCEPT_RSS_DEFAULT, "Accept-Encoding": "gzip, deflate"},
+    lambda url: build_headers(url),
+    lambda url: {**build_headers(url), "Accept-Encoding": "gzip, deflate"},
+]
+
+def _is_html_response(r: httpx.Response) -> bool:
+    ct = (r.headers.get("Content-Type") or "").lower()
+    return r.content[:64].lstrip().lower().startswith(b"<html") or "text/html" in ct
+
+def _is_json_feed(r: httpx.Response) -> bool:
+    ct = (r.headers.get("Content-Type") or "").lower()
+    return "application/feed+json" in ct or ("application/json" in ct and b'"items"' in r.content)
+
+async def _get_with_profiles(client: httpx.AsyncClient, url: str, timeout: float, retries: int = 2) -> httpx.Response:
+    last_exc = None
+    for attempt in range(retries + 1):
+        for prof in HEADER_PROFILES:
+            try:
+                async with _sem_for(url):
+                    await _jitter()
+                    r = await client.get(url, headers=prof(url), timeout=timeout)
+                if r.status_code in (200, 301, 302, 303, 307, 308):
+                    return r
+            except Exception as e:
+                last_exc = e
+        await asyncio.sleep(0.4 * (attempt + 1))
+    if last_exc:
+        raise last_exc
+    raise RuntimeError(f"GET failed for {url}")
+
+def _discover_alternate_feeds(html_text: str, base_url: str) -> List[str]:
+    soup = BeautifulSoup(html_text, "html.parser")
+    out = []
+    for link in soup.select('link[rel="alternate"]'):
+        t = (link.get("type") or "").lower()
+        href = (link.get("href") or "").strip()
+        if not href:
+            continue
+        if not href.startswith("http"):
+            href = urljoin(base_url, href)
+        if any(x in t for x in ("rss", "atom", "xml", "application/feed+json", "json")):
+            out.append(href)
+    seen = set(); feeds = []
+    for u in out:
+        if u not in seen:
+            seen.add(u); feeds.append(u)
+    return feeds
+
+def _parse_json_feed(body: bytes, base_url: str) -> List[Tuple[str, str, datetime | None]]:
+    try:
+        data = orjson.loads(body)
+    except Exception:
+        return []
+    items = data.get("items") or []
+    out: List[Tuple[str, str, datetime | None]] = []
+    for it in items:
+        t = (it.get("title") or "").strip()
+        l = it.get("url") or it.get("external_url") or ""
+        if not t or not l:
+            continue
+        if not str(l).startswith("http"):
+            l = urljoin(base_url, str(l))
+        dt = None
+        for k in ("date_published", "date_modified"):
+            v = it.get(k)
+            if not v: continue
+            try:
+                dt = datetime.fromisoformat(str(v).replace("Z","+00:00"))
+                if dt.tzinfo is None: dt = dt.replace(tzinfo=timezone.utc)
+                dt = dt.astimezone(timezone.utc)
+                break
+            except Exception:
+                pass
+        out.append((t, l, dt))
+    return out
+
+# Oryginalny RSS (zostawiony do możliwości użycia gdzie indziej)
+async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
+    posts: List[Tuple[str, str, datetime | None]] = []
+    try:
+        async with _sem_for(url):
+            await _jitter()
+            r = await client.get(url, headers=build_headers(url))
+        if r.status_code == 200 and r.content[:64].lstrip().lower().startswith(b"<html"):
+            log.info(f"RSS looks like HTML (not XML): {url} [CT={r.headers.get('Content-Type')}]")
+        if r.status_code == 200:
+            feed = feedparser.parse(r.content)
+            for e in feed.entries:
+                t = e.get("title"); raw = e.get("link") or e.get("id") or e.get("guid")
+                if not t or not raw: continue
+                raw = str(raw)
+                l = raw if raw.startswith("http") else urljoin(f"{urlparse(url).scheme}://{urlparse(url).netloc}/", raw.lstrip("/"))
+                posts.append((t, l, _parse_entry_datetime(e)))
+            return posts
+    except Exception as e:
+        log.info(f"Error fetching RSS {url}: {e}")
+    return posts
+
+# Nowa „sklejka” – łączy WSZYSTKIE logiki i zwraca unikalne wpisy
+async def fetch_any(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str, datetime | None]]:
+    all_items: List[Tuple[str, str, datetime | None]] = []
+
+    def _merge(candidates: List[Tuple[str,str,datetime|None]], base: str | None = None):
+        nonlocal all_items
+        seen = {canonicalize_url(l) for _, l, _ in all_items}
+        for t, l, dt in candidates:
+            link = l
+            if base and link and not str(link).startswith("http"):
+                link = urljoin(base, str(link))
+            c = canonicalize_url(link)
+            if c and c not in seen:
+                seen.add(c)
+                all_items.append((t or "Nowy wpis", c, dt))
+
+    # 1) profile nagłówków -> 2) JSON Feed -> 3) HTML discovery -> 4) fallback scraping
+    try:
+        r = await _get_with_profiles(client, url, timeout=HTTP_TIMEOUT)
+
+        if _is_json_feed(r):
+            _merge(_parse_json_feed(r.content, url))
+            if all_items: return all_items
+
+        if _is_html_response(r):
+            alts = _discover_alternate_feeds(r.text, url)
+            for alt in alts[:3]:
+                try:
+                    r2 = await _get_with_profiles(client, alt, timeout=HTTP_TIMEOUT)
+                    if _is_json_feed(r2):
+                        _merge(_parse_json_feed(r2.content, alt))
+                        if all_items: return all_items
+                    else:
+                        f2 = feedparser.parse(r2.content)
+                        _merge([(e.get("title"), (e.get("link") or e.get("id") or e.get("guid") or ""), _parse_entry_datetime(e)) for e in f2.entries], base=alt)
+                        if all_items: return all_items
+                except Exception:
+                    continue
+
+        # standardowy feed z oryginalnego URL
+        f = feedparser.parse(r.content)
+        _merge([(e.get("title"), (e.get("link") or e.get("id") or e.get("guid") or ""), _parse_entry_datetime(e)) for e in f.entries], base=url)
+        if all_items: return all_items
+
+    except Exception:
+        pass
+
+    # Scraping jako ostatnia instancja
+    try:
+        _merge(await scrape_webpage(client, url))
+    except Exception:
+        pass
+
+    return all_items
+
 # ---------- MAIN ----------
 def _prioritize_sources(urls: List[str]) -> List[str]:
     priority = ["travel-dealz.com","secretflying.com","theflightdeal.com","loter"]
@@ -436,7 +622,6 @@ async def process_feeds_async() -> str:
     if not TG_TOKEN or not TG_CHAT_ID:
         return "Missing TG_TOKEN/TG_CHAT_ID."
 
-    # Sprzątamy kolejkę kasowania na starcie przebiegu.
     swept1 = await sweep_delete_queue()
 
     rss, web = get_rss_sources(), get_web_sources()
@@ -453,14 +638,14 @@ async def process_feeds_async() -> str:
 
     items_raw: List[Tuple[str, str, datetime | None]] = []
     async with make_async_client() as client:
-        coros = []
-        for u in sources:
-            is_rss = any(s in u.lower() for s in ("/feed","rss",".xml","?feed"))
-            coros.append((fetch_feed if is_rss else scrape_webpage)(client, u))
+        coros = [fetch_any(client, u) for u in sources]
         results = await asyncio.gather(*coros, return_exceptions=True)
     for r in results:
-        if isinstance(r, Exception): dbg(f"task err: {r}"); continue
-        if r: items_raw.extend(r)
+        if isinstance(r, Exception):
+            dbg(f"task err: {r}")
+            continue
+        if r:
+            items_raw.extend(r)
 
     # kanonizacja + wstępny dedup (w sesji)
     seen, items = set(), []
@@ -469,7 +654,8 @@ async def process_feeds_async() -> str:
         if not canon: continue
         if (not DISABLE_DEDUP) and (canon in sent_links): continue
         if canon in seen: continue
-        seen.add(canon); items.append((title or "Nowy wpis", canon, dt))
+        seen.add(canon)
+        items.append((title or "Nowy wpis", canon, dt))
 
     # świeżość + sort
     if USE_EVENT_TIME:
@@ -479,7 +665,8 @@ async def process_feeds_async() -> str:
         items.sort(key=lambda x: (x[2] is None, x[2] or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
 
     # limity
-    per_host: Dict[str,int] = {}; out: List[Tuple[str,str]] = []
+    per_host: Dict[str,int] = {}
+    out: List[Tuple[str,str]] = []
     for t, l, _ in items:
         host = urlparse(l).netloc.lower().replace("www.","")
         if per_host.get(host,0) >= MAX_PER_DOMAIN: continue
@@ -489,15 +676,17 @@ async def process_feeds_async() -> str:
         out = out[:MAX_POSTS_PER_RUN]
 
     # wysyłka
-    sent = 0; now_iso = now.isoformat()
+    sent = 0
+    now_iso = now.isoformat()
     for t, l in out:
-        if await send_telegram_message_async(t, l, TG_CHAT_ID):
-            sent_links[l] = now_iso; sent += 1
+        ok = await send_telegram_message_async(t, l, TG_CHAT_ID)
+        if ok:
+            sent_links[l] = now_iso
+            sent += 1
 
     state["sent_links"] = sent_links
     save_state_atomic(state, gen)
 
-    # drugie sprzątanie na końcu rundy
     swept2 = await sweep_delete_queue()
 
     return f"sources={len(sources)} items_in={len(items_raw)} candidates={len(items)} sent={sent} pruned={pruned} kept={len(sent_links)} swept={swept1+swept2}"
@@ -532,7 +721,6 @@ def telegram_webhook():
     result = asyncio.run(process_feeds_async())
     return jsonify({"ok":True,"result":result})
 
-# Cron do samego sprzątania (opcjonalnie pod Cloud Scheduler)
 @app.get("/tasks/sweep")
 def tasks_sweep():
     deleted = asyncio.run(sweep_delete_queue())
