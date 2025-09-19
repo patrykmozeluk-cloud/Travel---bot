@@ -6,7 +6,7 @@ import feedparser
 import orjson
 import time
 import random
-import html
+import html as html_mod
 from flask import Flask, request, jsonify
 from google.cloud import storage
 from urllib.parse import urlparse, urlunparse, parse_qsl, urlencode, unquote
@@ -39,11 +39,11 @@ DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1","true","True","yes","YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1","true","True","yes","YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
 
-# nowość: TTL-e (odwracalne ENV)
+# TTL-e
 DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))     # kasowanie postów po X h
 DEDUP_TTL_HOURS   = int(env("DEDUP_TTL_HOURS",   "24"))       # jak długo trzymać link w sent_links
 
-# uliczne domyślne
+# domyślne
 MAX_PER_DOMAIN = int(env("MAX_PER_DOMAIN", "5"))
 PER_HOST_CONCURRENCY = int(env("PER_HOST_CONCURRENCY", "2"))
 JITTER_MIN_MS = int(env("JITTER_MIN_MS", "120"))
@@ -96,7 +96,6 @@ def canonicalize_url(url: str) -> str:
         return url.strip()
 
 # stan + kształt
-
 def _default_state() -> Dict[str, Any]:
     return {"sent_links": {}, "delete_queue": []}
 
@@ -114,7 +113,7 @@ def load_state() -> Tuple[Dict[str, Any], int | None]:
         data = _blob.download_as_bytes()
         generation = _blob.generation
         state_data = orjson.loads(data)
-        # migracje starych formatów
+        # migracje starych formatów (lista -> dict z timestampem)
         if isinstance(state_data.get("sent_links"), list):
             state_data["sent_links"] = {
                 link: datetime.now(timezone.utc).isoformat()
@@ -276,7 +275,7 @@ async def send_telegram_message_async(title: str, link: str, chat_id: str | None
         log.error("Brak TG_TOKEN/TG_CHAT_ID.")
         return False
 
-    safe_title = html.escape(title or "", quote=False)
+    safe_title = html_mod.escape(title or "", quote=False)
     text = f"<b>{safe_title}</b>\n\n{link}"
 
     payload = {
@@ -316,6 +315,53 @@ def remember_for_deletion(chat_id: str, message_id: int, delete_at: datetime) ->
     })
     save_state_atomic(state, gen)
 
+async def sweep_delete_queue(now: datetime | None = None) -> int:
+    """Usuwa z Telegrama wiadomości, którym minął TTL. Zwraca liczbę skasowanych."""
+    if not TG_TOKEN or not TG_CHAT_ID:
+        return 0
+    state, gen = load_state()
+    _ensure_state_shapes(state)
+    dq = state.get("delete_queue", [])
+    if not dq:
+        return 0
+
+    now = now or datetime.now(timezone.utc)
+    keep: List[Dict[str, Any]] = []
+    deleted = 0
+
+    async with make_async_client() as client:
+        for item in dq:
+            try:
+                delete_at = datetime.fromisoformat(item["delete_at"])
+                if delete_at.tzinfo is None:
+                    delete_at = delete_at.replace(tzinfo=timezone.utc)
+            except Exception:
+                # nieczytelne — sprzątamy
+                continue
+
+            if delete_at > now:
+                keep.append(item)
+                continue
+
+            try:
+                url = f"https://api.telegram.org/bot{TG_TOKEN}/deleteMessage"
+                payload = {
+                    "chat_id": item["chat_id"],
+                    "message_id": item["message_id"]
+                }
+                r = await client.post(url, json=payload, timeout=HTTP_TIMEOUT)
+                # Telegram może nie skasować (np. już zniknęła) — nie blokujemy się
+                if r.status_code == 200:
+                    deleted += 1
+                else:
+                    dbg(f"deleteMessage status={r.status_code} body={r.text[:200]}")
+            except Exception as e:
+                dbg(f"deleteMessage error: {e}")
+
+    state["delete_queue"] = keep
+    save_state_atomic(state, gen)
+    return deleted
+
 # --- FETCH & SCRAPE ---
 async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
     posts: List[Tuple[str, str]] = []
@@ -349,12 +395,11 @@ async def fetch_feed(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str
         try:
             host = urlparse(url).netloc.lower()
             if "marocmama.com" in host:
-                return (await marocmama_fallback(make_async_client(), domain_root(url)))[:MAX_PER_DOMAIN]
+                # uwaga: tu przekazujemy *klienta*, nie fabrykę
+                return (await marocmama_fallback(client, domain_root(url)))[:MAX_PER_DOMAIN]
         except Exception:
             pass
     return []
-
-# selektory do scraperów
 
 def _selectors_for(host: str) -> List[str]:
     precise: Dict[str, List[str]] = {
@@ -455,51 +500,4 @@ async def marocmama_fallback(client_or_ctx, root_url: str) -> List[Tuple[str, st
                 title = (a.get_text(strip=True) or "").strip() or "Nowy wpis"
                 posts.append((title, href))
             if posts:
-                break
-        if posts:
-            log.info(f"marocmama fallback returned {len(posts)} items from homepage")
-        return posts[:MAX_PER_DOMAIN]
-    except Exception as e:
-        log.info(f"marocmama fallback failed: {e}")
-        return []
-    finally:
-        if created:
-            await client.aclose()
-
-async def scrape_webpage(client: httpx.AsyncClient, url: str) -> List[Tuple[str, str]]:
-    return await _try_variants_scrape(client, url)
-
-# --- MAIN FLOW ---
-def _prioritize_sources(urls: List[str]) -> List[str]:
-    priority_hosts = ["travel-dealz.com", "secretflying.com", "theflightdeal.com", "loter"]
-    def score(u: str) -> int:
-        host = urlparse(u).netloc.lower()
-        for i, h in enumerate(priority_hosts):
-            if h in host:
-                return i
-        return len(priority_hosts)
-    return sorted(urls, key=score)
-
-async def process_feeds_async() -> str:
-    log.info("Starting hybrid processing.")
-    if not TG_TOKEN or not TG_CHAT_ID:
-        return "Missing TG_TOKEN/TG_CHAT_ID."
-
-    rss = get_rss_sources()
-    web = get_web_sources()
-    sources = _prioritize_sources(rss + web)
-    if not sources:
-        return "No sources found."
-
-    state, generation = load_state()
-    sent_links_dict: Dict[str, str] = state.get("sent_links", {})
-
-    all_posts: List[Tuple[str, str]] = []
-    async with make_async_client() as client:
-        tasks = []
-        for url in sources:
-            is_rss = any(tok in url.lower() for tok in ["rss", "feed", ".xml"]) or url.lower().endswith("/feed/")
-            if is_rss:
-                tasks.append(fetch_feed(client, url))
-            else:
-                tasks.append(scrape_webpage(client,
+         
