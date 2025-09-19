@@ -571,7 +571,12 @@ def healthz():
 def run_now():
     result = asyncio.run(process_feeds_async())
     return jsonify({"status": "done", "result": result})
-
+@app.get("/tasks/rss")
+@app.post("/tasks/rss")
+def tasks_rss():
+    # dokładnie ta sama ścieżka wykonania co /run
+    result = asyncio.run(process_feeds_async())
+    return jsonify({"status": "done", "result": result})
 @app.post("/telegram/webhook")
 def telegram_webhook():
     if not ENABLE_WEBHOOK:
