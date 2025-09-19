@@ -40,6 +40,21 @@ DISABLE_DEDUP = env("DISABLE_DEDUP", "0") in {"1","true","True","yes","YES"}
 DEBUG_FEEDS = env("DEBUG_FEEDS", "0") in {"1","true","True","yes","YES"}
 MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = brak limitu
 
+# --- Telegram rate-limit (bez env, stałe, minimalna ingerencja) ---
+TG_RATE_INTERVAL = 1.1  # sekundy między wiadomościami do tego samego czatu
+_tg_last_send_ts: float | None = None
+_tg_send_lock = asyncio.Lock()
+
+async def _tg_throttle():
+    global _tg_last_send_ts
+    async with _tg_send_lock:
+        now = time.monotonic()
+        if _tg_last_send_ts is not None:
+            wait = _tg_last_send_ts + TG_RATE_INTERVAL - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+        _tg_last_send_ts = time.monotonic()
+        
 # TTL
 DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))
 DEDUP_TTL_HOURS = int(env("DEDUP_TTL_HOURS", "24"))
