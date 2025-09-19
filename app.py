@@ -43,7 +43,7 @@ MAX_POSTS_PER_RUN = int(env("MAX_POSTS_PER_RUN", "0"))  # 0 = bez limitu
 DELETE_AFTER_HOURS = int(env("DELETE_AFTER_HOURS", "24"))     # kasowanie postów po X h
 DEDUP_TTL_HOURS   = int(env("DEDUP_TTL_HOURS",   "24"))       # jak długo trzymać link w sent_links
 
-# „uliczne” domyślne
+# uliczne domyślne
 MAX_PER_DOMAIN = int(env("MAX_PER_DOMAIN", "5"))
 PER_HOST_CONCURRENCY = int(env("PER_HOST_CONCURRENCY", "2"))
 JITTER_MIN_MS = int(env("JITTER_MIN_MS", "120"))
