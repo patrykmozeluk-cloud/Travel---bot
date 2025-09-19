@@ -1,17 +1,39 @@
-# Moje kanały RSS - Travel Bot
+# Fly4Free (PL i EN)
 https://www.fly4free.pl/feed/
 https://www.fly4free.com/feed/
+
+# MarocMama (główny + marokańskie jedzenie)
 https://marocmama.com/feed
 https://marocmama.com/moroccan-food/feed
+
+# Barefoot Nomad (główny + kategorie)
 https://www.thebarefootnomad.com/feed
 https://www.thebarefootnomad.com/posts/feed
 https://www.thebarefootnomad.com/topics/asia/feed
+
+# Travelzoo
 https://www.travelzoo.com/feed
+
+# TravelFree
 https://travelfree.info/feed/
+
+# The Flight Deal
 https://www.theflightdeal.com/feed
+
+# Mleczne Podróże
 https://feeds.feedburner.com/MlecznePodroze
+
+# Tanie Loty (czytelnia/promocje)
 https://www.tanie-loty.com.pl/czytelnia/feed/
+
+# Travel-Dealz
 https://travel-dealz.com/feed/
+
+# Secret Flying
 https://www.secretflying.com/feed/
+
+# Two Monkeys
 https://twomonkeystravelgroup.com/feed/
+
+# Wakacyjni Piraci
 https://www.wakacyjnipiraci.pl/feed
