@@ -1,3 +1,4 @@
+# app.py
 import os, logging, asyncio, time, random, html as html_mod
 from typing import Dict, Any, Tuple, List
 from datetime import datetime, timedelta, timezone
@@ -151,7 +152,6 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
         "rss_no_brotli": "1",
         "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
     },
-
     "wakacyjnipiraci.pl": {
         "ua": "Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Mobile Safari/537.36",
         "al": "pl-PL,pl;q=0.9,en-US,en;q=0.8",
@@ -159,50 +159,10 @@ STICKY_IDENTITY: Dict[str, Dict[str, str]] = {
         "rss_no_brotli": "1",
         "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
     },
-
     "travel-dealz.com": {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
         "al": "de-DE,de;q=0.9,en-US;q=0.8,en;q=0.7",
         "referer": "https://www.google.com/",
-    },
-
-    "secretflying.com": {
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
-        "al": "en-US,en;q=0.9",
-        "referer": "https://secretflying.com/",
-    },
-
-    "theflightdeal.com": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "al": "en-US,en;q=0.9",
-        "referer": "https://www.google.com/",
-    },
-
-    "travelfree.info": {
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "al": "en-US,en;q=0.9",
-        "referer": "https://travelfree.info/",
-        "rss_no_brotli": "1",
-        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
-    },
-
-    "twomonkeystravelgroup.com": {
-        "ua": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "al": "en-US,en;q=0.9",
-        "referer": "https://twomonkeystravelgroup.com/",
-        "rss_no_brotli": "1",
-        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
-    },
-
-    "thebarefootnomad.com": {
-        "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36",
-        "al": "en-US,en;q=0.9",
-        "referer": "https://www.thebarefootnomad.com/",
-        "rss_no_brotli": "1",
-        "rss_accept": "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7",
-    },
-}
-
     },
     "secretflying.com": {
         "ua": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:122.0) Gecko/20100101 Firefox/122.0",
@@ -254,6 +214,11 @@ def build_headers(url: str) -> Dict[str, str]:
         h["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123 Safari/537.36"
         h["Accept-Language"] = "en-US,en;q=0.9"
         h["Referer"] = f"{p.scheme}://{p.netloc}/"
+
+    # Dodatkowe wzmocnienie dla RSS bez profilu:
+    if is_rss and not ident:
+        h["Accept"] = "application/rss+xml, application/xml;q=0.9, text/xml;q=0.8, */*;q=0.7"
+        h["Accept-Encoding"] = "gzip, deflate"
     return h
 
 def make_async_client() -> httpx.AsyncClient:
@@ -460,10 +425,13 @@ async def process_feeds_async() -> str:
     if not TG_TOKEN or not TG_CHAT_ID:
         return "Missing TG_TOKEN/TG_CHAT_ID."
 
+    # Sprzątamy kolejkę kasowania na starcie przebiegu.
+    swept1 = await sweep_delete_queue()
+
     rss, web = get_rss_sources(), get_web_sources()
     sources = _prioritize_sources(rss + web)
     if not sources:
-        return "No sources."
+        return f"No sources. swept={swept1}"
 
     state, gen = load_state(); _ensure_state_shapes(state)
     sent_links = state.get("sent_links", {})
@@ -499,7 +467,7 @@ async def process_feeds_async() -> str:
         items = [it for it in items if (it[2] is None or it[2] >= cutoff)]
         items.sort(key=lambda x: (x[2] is None, x[2] or datetime.min.replace(tzinfo=timezone.utc)), reverse=True)
 
-    # JEDYNE cięcie limitów
+    # limity
     per_host: Dict[str,int] = {}; out: List[Tuple[str,str]] = []
     for t, l, _ in items:
         host = urlparse(l).netloc.lower().replace("www.","")
@@ -518,7 +486,10 @@ async def process_feeds_async() -> str:
     state["sent_links"] = sent_links
     save_state_atomic(state, gen)
 
-    return f"sources={len(sources)} items_in={len(items_raw)} candidates={len(items)} sent={sent} pruned={pruned} kept={len(sent_links)}"
+    # drugie sprzątanie na końcu rundy
+    swept2 = await sweep_delete_queue()
+
+    return f"sources={len(sources)} items_in={len(items_raw)} candidates={len(items)} sent={sent} pruned={pruned} kept={len(sent_links)} swept={swept1+swept2}"
 
 # ---------- ROUTES ----------
 @app.get("/")
@@ -549,3 +520,9 @@ def telegram_webhook():
         return jsonify({"ok":False,"error":"forbidden"}), 403
     result = asyncio.run(process_feeds_async())
     return jsonify({"ok":True,"result":result})
+
+# Cron do samego sprzątania (opcjonalnie pod Cloud Scheduler)
+@app.get("/tasks/sweep")
+def tasks_sweep():
+    deleted = asyncio.run(sweep_delete_queue())
+    return jsonify({"ok":True, "deleted": deleted})
